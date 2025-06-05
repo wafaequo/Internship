@@ -1,0 +1,6 @@
+Name file	n. of events	% anomalies	analysis from	% anomalies flow Rate	% anomalies Signal	% anomalies Margins
+Tube_002_Broekk vd 070853_250204 Broek vd 070853_20250204_174358	326043	9.58	Flow Rate, Flow Signal and Flow Margin	6.18	0.32	3.62
+Tube_002_Broekk vd 070853_250204 Broek vd 070853_20250204_174358	326043	9.58	Flow Rate, Flow Signal and Flow Margin	6.18	0.32	3.62
+Tube_002_Broekk vd 070853_250204 Broek vd 070853_20250204_174358	326043	9.58	Flow Rate, Flow Signal and Flow Margin	6.18	0.32	3.62
+Tube_002_Broekk vd 070853_250204 Broek vd 070853_20250204_174358	326043	9.58	Flow Rate, Flow Signal and Flow Margin	6.18	0.32	3.62
+Tube_002_Broekk vd 070853_250204 Broek vd 070853_20250204_174358	326043	9.58	Flow Rate, Flow Signal and Flow Margin	6.18	0.32	3.62
