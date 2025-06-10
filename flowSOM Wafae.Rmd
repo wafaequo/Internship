@@ -1,0 +1,197 @@
+---
+title: "Following protocol for flowSOM implementation"
+output: html_notebook
+---
+
+NOTE: *R version 4.5.0*. Also make sure [Rtools45](https://cran.r-project.org/bin/windows/Rtools/rtools45/rtools.html) is downloaded.
+
+## STEP 0: DOWNLOADING PACKAGES (SKIP IF ALREADY DOWNLOADED)
+
+Navigate towards Tools \> Install Packages and download the following packages:
+
+1.  *ggplot2*
+2.  *ggpubr*
+3.  *pheatmap*
+4.  *tidyr*
+5.  *devtools*
+
+Then go on to download *BioConductor* in the following way in order to download *FlowCore* correctly.
+
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+#The following initializes usage of Bioc devel
+BiocManager::install(version='devel')
+BiocManager::install("flowCore", force = TRUE)
+BiocManager::install("flowAI")
+
+#use devtools to download packages from github
+devtools::install_github("saeyslab/PeacoQC", force=TRUE)
+devtools::install_github("saeyslab/FlowSOM")
+```
+
+## STEP 1: READING IN .FCS FILES / .LMD FILES
+
+```{r}
+library('flowCore') 
+library('FlowSOM') 
+library('ggplot2')
+library('flowAI')
+```
+
+```{r}
+knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
+                      message = FALSE, cache.lazy = FALSE)
+#initialise pathways
+fcs_dir <- "D:/Internship/data/AML patients/"
+cleaned_fcs_dir <- file.path(fcs_dir, "Cleaned_FCS")
+
+if (!dir.exists(cleaned_fcs_dir)) {
+  dir.create(cleaned_fcs_dir)}
+
+original_ds <- list.files(path=fcs_dir, pattern= '\\.LMD$', full.names=FALSE)
+
+#extracting data used in my study
+patient_ids <- sub(".*-(\\d+) tube.*", "\\1", original_ds)
+patient_counts <- table(patient_ids)
+patients_with_7_tubes <- names(patient_counts[patient_counts == 7])
+
+fcs_files <- original_ds[patient_ids %in% patients_with_7_tubes]
+
+fcs_data_list <- list()
+
+#read all .LMD files in folder and save them to fcs_data_list
+for (i in 1:length(fcs_files)) {
+  file_path <- file.path(fcs_dir, fcs_files[i])
+  fcs_data_list[[i]] <- read.FCS(file_path, dataset=1)
+}
+
+```
+
+```{r}
+#inspect one file
+ff <- flow_frame <- fcs_data_list[[1]]
+ff@parameters@data #explains parameters found in .fcs file
+
+#names(ff)
+```
+
+#### abbreviations used
+
+FS INT LIN: forward scatter.
+
+-   relates to the size of the cell
+
+SS INT LIN: side scatter
+
+-   reflects the complexity or granularity of the cell
+
+TIME: duration of cell's passage through the laser beam
+
+PEAK: is used to separate doublets from singlets.
+
+## STEP 2: MANUAL COMPENSATION
+
+Compensation can be done automatically or manually. For this, a **Spillover Spreading Matrix (SSM)** needs to be made. This matrix has been revealed to demonstrate fluorescence spectrum interactions. This compensation of flow cytometry data is essential as it corrects for the overlap of fluorescent signals between different channels.
+
+```{r}
+library(readxl)
+
+comp_matrix <- read_excel("D:/Internship/compensation_matrix.xlsx")
+
+#Renaming row+columns and converting to num matrix.
+comp_mat <- as.matrix(comp_matrix[, -c(1, 2)])
+rownames(comp_mat) <- comp_matrix[[1]]
+comp_mat <- comp_mat[-1, ]
+comp_mat <- apply(comp_mat, 2, as.numeric)
+
+fcs_data_list_comp <- lapply(fcs_data_list, function(ff) {
+  compensate(ff, comp_mat)
+})
+```
+
+```{r}
+fcs_data_list_comp[[1]]@parameters@data
+```
+
+## STEP 3: QUALITY CHECK USING flowAI
+
+flowAI is used to remove events having anomalous values when looking at three aspect of a flow cytometry analysis:
+
+1.  **flow rate**: Checks whether cells are passin through the flow cytometer at an appropriate rate. Anomalies could be due to issues like clumping of cells, clogging or incorrect flow rate settings. A high percentages suggests that cells may be analyzed under suboptimal flow conditions.
+
+    -   Uses *generalized ESD* to detect outliers (see .ppt for further elaboration
+
+2.  **signal acquisition**: accounts for fluorescence and scatter signal of cells. Anomalies can arise due to inadequate staining, photobleaching etc. A substantial proportion of cells with anomalous signal acquisition can lead to inaccurate fluorescence intensity measurements, affecting the interpretation of the data.
+
+    \- Uses *Binary Segmentation* to check for changepoints and remove instable regions
+
+3.  **dynamic range**: Evaluates whether intensities of cells fall within detectable range of cytometer. Cells outside this range can either be too dim (below detection limit) or too bright (causing signal saturation), both of which can skew data interpretation.
+
+    -   Filter out all measurements above hard upper limit and removes all negative scatter values. For fluorescent channels, it removed outliers of negative range.
+
+several arguments can be changed within flow_auto_qc to improve quality control results. Moreover, remove_from can be used to perform partial quality control on only one or two of the above mentioned properties.
+
+The suggestion is to run automatic method first with default settings, if results are not satisfying, we can modify arguments.
+
+```{r}
+warnings()
+
+#loop through all .lmd files and perform quality control
+for (i in 1:length(fcs_data_list_comp)) {
+  proceed_flag <- TRUE
+
+  flow_frame <- fcs_data_list_comp[[i]]
+  tryCatch({
+    cleaned_fcs_data <- flow_auto_qc(flow_frame)
+  }, error = function(e) {
+    cat("Error in flow_auto_qc: ", as.character(e$message), "\n")
+    proceed_flag <- FALSE  # Set flag to not proceed
+  })
+  
+  if (proceed_flag) {
+    cleaned_file_name <- paste0("Cleaned_", fcs_files[i])
+    cleaned_file_path <- file.path(cleaned_fcs_dir, cleaned_file_name)
+  
+    tryCatch({
+      write.FCS(cleaned_fcs_data, cleaned_file_path)
+    }, error = function(e) {
+      cat("Error in write.FCS: ", as.character(e$message), "\n")
+    })
+    
+    # Display a message to indicate progress
+    cat("Saved cleaned FCS file to:", cleaned_file_path, "\n")
+  }
+}
+
+```
+
+## **STEP 4: TRANSFORMATION**
+
+Compensation corrects for spectral overlap between different fluorochromes, but it doesn't address the issue of data distribution. Flow cytometry data often exhibits positively skewed distribution. Transformations like log or biexponential (logicle) are used to convert this skewed data into a more normally distributed form.
+
+```{r}
+
+```
+
+```{r}
+summary(fcs1)
+```
+
+`{c("SSC-A", "FITC-A", "PE-A", "PerCP-Cy5.5-A", "PE-Cy7-A", "APC-A", "APC-R700-A")}`
+
+Here we perform the removal of margin events and also the compensation is done. - Compensation is done to correct for spillover - removal of margin events, because these
+
+```{r}
+channels_of_interest <- GetChannels(object = fcs1, markers = markers_of_interest, exact = FALSE)
+
+ff_m <- PeacoQC::RemoveMargins(fcs1, markers_of_interest)
+ff_c <- compensate(ff_m, spillover(fcs1)$`$SPILLOVER`) #spillover(fcs1) extracts the spillover matrix from the metadata of the file.
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
