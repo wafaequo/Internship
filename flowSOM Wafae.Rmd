@@ -31,7 +31,7 @@ devtools::install_github("saeyslab/PeacoQC", force=TRUE)
 devtools::install_github("saeyslab/FlowSOM")
 ```
 
-## STEP 1: READING IN .FCS FILES / .LMD FILES
+## STEP 1: READING IN .FCS FILES / .LMD FILES + STANDARDIZING OF NAMES ETC.
 
 ```{r}
 library('flowCore') 
@@ -44,37 +44,108 @@ library('flowAI')
 knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
                       message = FALSE, cache.lazy = FALSE)
 #initialise pathways
-fcs_dir <- "D:/Internship/data/AML patients/"
+fcs_dir <- "D:/Internship/data/full dataset/"
 cleaned_fcs_dir <- file.path(fcs_dir, "Cleaned_FCS")
 
 if (!dir.exists(cleaned_fcs_dir)) {
   dir.create(cleaned_fcs_dir)}
 
 original_ds <- list.files(path=fcs_dir, pattern= '\\.LMD$', full.names=FALSE)
+patient_ids <- as.integer(sub(".*[^0-9](\\d+)\\s+tube.*", "\\1", original_ds))
+patient_file_dict <- split(original_ds, patient_ids)
 
-#extracting data used in my study
-patient_ids <- sub(".*-(\\d+) tube.*", "\\1", original_ds)
-patient_counts <- table(patient_ids)
-patients_with_7_tubes <- names(patient_counts[patient_counts == 7])
+#select which patients you want to extract from? AML, MDS, healthy or fulldataset
+#aml_patients = c(144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
 
-fcs_files <- original_ds[patient_ids %in% patients_with_7_tubes]
+#mds_patients = c(103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211)
+
+healthy_patients = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50)
+
+#full_dataset = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50,103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
+
+if (exists("aml_patients")) {
+  fcs_files <- unlist(patient_file_dict[as.character(aml_patients)])
+} else if (exists("mds_patients")) {
+  fcs_files <- unlist(patient_file_dict[as.character(mds_patients)])
+} else if (exists("healthy_patients")) {
+  fcs_files <- unlist(patient_file_dict[as.character(healthy_patients)])
+} else if (exists("full_dataset")) {
+  fcs_files <- unlist(patient_file_dict[as.character(full_dataset)])
+} else {
+  stop("No patient group was defined.")
+}
 
 fcs_data_list <- list()
 
 #read all .LMD files in folder and save them to fcs_data_list
 for (i in 1:length(fcs_files)) {
   file_path <- file.path(fcs_dir, fcs_files[i])
-  fcs_data_list[[i]] <- read.FCS(file_path, dataset=1)
+  fcs_data_list[[i]] <- read.FCS(file_path, dataset=2)
 }
-
 ```
 
 ```{r}
 #inspect one file
-ff <- flow_frame <- fcs_data_list[[1]]
-ff@parameters@data #explains parameters found in .fcs file
+ff <- fcs_data_list[[2]]
+#keyword(ff)
+colnames(ff)
+```
 
-#names(ff)
+During compensation it was seen that not all flowFrames had same column names. So to standardize, column names of the fluorochrome channels are standardized.
+
+```{r}
+#renaming columns
+rename_common_channels <- function(ff) {
+  standard_names <- c("FITC", "PE", "ECD", "PC5.5", "PC7", "APC", "A700", "A750", "HLA", "KO")
+  
+  old_names <- colnames(ff)
+  new_names <- old_names
+  
+  fl_int_log <- paste0("FL", 1:10, " INT LOG")
+  fl_dash_a <- paste0("FL", 1:10, "-A")
+  
+  for (i in seq_along(standard_names)) {
+    match_name <- c(fl_int_log[i], fl_dash_a[i])
+    matched_idx <- which(old_names %in% match_name)
+    if (length(matched_idx) > 0) {
+      new_names[matched_idx[1]] <- standard_names[i]
+    }
+  }
+  
+  colnames(ff@exprs) <- new_names
+  colnames(ff) <- new_names
+  return(ff)
+}
+
+renamed_fcs_list <- lapply(fcs_data_list, rename_common_channels)
+```
+
+```{r}
+#saving renamed .fcs files
+output_dir <- normalizePath("D:/Internship/data/full dataset with renamed columns", mustWork = FALSE)
+dir.create(output_dir, showWarnings = FALSE)
+
+clean_file_names <- paste0(tools::file_path_sans_ext(basename(fcs_files)), ".fcs")
+
+if (length(clean_file_names) != length(renamed_fcs_list)) {
+  stop("Length of fsc_files and renamed_fcs_list do not match!")
+}
+
+for (i in seq_along(renamed_fcs_list)) {
+  ff <- renamed_fcs_list[[i]]
+  
+  if (!inherits(ff, "flowFrame")) {
+    warning(paste("Skipping element", i, "— not a valid flowFrame"))
+    next
+  }
+  
+  file_name <- clean_file_names[i]
+  full_path <- file.path(output_dir, file_name)
+  
+  cat("Saving:", full_path, "\n")
+  write.FCS(ff, filename = full_path)
+}
+
 ```
 
 #### abbreviations used
@@ -95,10 +166,12 @@ PEAK: is used to separate doublets from singlets.
 
 Compensation can be done automatically or manually. For this, a **Spillover Spreading Matrix (SSM)** needs to be made. This matrix has been revealed to demonstrate fluorescence spectrum interactions. This compensation of flow cytometry data is essential as it corrects for the overlap of fluorescent signals between different channels.
 
+NOTE: make sure compensation matrix is in fractions and NOT percentages!!
+
 ```{r}
 library(readxl)
 
-comp_matrix <- read_excel("D:/Internship/compensation_matrix.xlsx")
+comp_matrix <- read_excel("D:/Internship/spillover_matrix.xlsx")
 
 #Renaming row+columns and converting to num matrix.
 comp_mat <- as.matrix(comp_matrix[, -c(1, 2)])
@@ -106,13 +179,13 @@ rownames(comp_mat) <- comp_matrix[[1]]
 comp_mat <- comp_mat[-1, ]
 comp_mat <- apply(comp_mat, 2, as.numeric)
 
-fcs_data_list_comp <- lapply(fcs_data_list, function(ff) {
+fcs_data_list_comp <- lapply(renamed_fcs_list, function(ff) {
   compensate(ff, comp_mat)
 })
 ```
 
 ```{r}
-fcs_data_list_comp[[1]]@parameters@data
+
 ```
 
 ## STEP 3: QUALITY CHECK USING flowAI
@@ -169,14 +242,14 @@ for (i in 1:length(fcs_data_list_comp)) {
 
 ## **STEP 4: TRANSFORMATION**
 
-Compensation corrects for spectral overlap between different fluorochromes, but it doesn't address the issue of data distribution. Flow cytometry data often exhibits positively skewed distribution. Transformations like log or biexponential (logicle) are used to convert this skewed data into a more normally distributed form.
+Compensation corrects for spectral overlap between different fluorochromes, but it doesn't address the issue of data distribution. Flow cytometry data often exhibits positively skewed distribution. Transformations like log or biexponential (logicle) are used to convert this skewed data into a more normally distributed form. Which type of scaling should I use?
 
 ```{r}
 
 ```
 
 ```{r}
-summary(fcs1)
+
 ```
 
 `{c("SSC-A", "FITC-A", "PE-A", "PerCP-Cy5.5-A", "PE-Cy7-A", "APC-A", "APC-R700-A")}`
