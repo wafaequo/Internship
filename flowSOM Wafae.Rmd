@@ -5,7 +5,7 @@ output: html_notebook
 
 NOTE: *R version 4.5.0*. Also make sure [Rtools45](https://cran.r-project.org/bin/windows/Rtools/rtools45/rtools.html) is downloaded.
 
-## STEP 0: DOWNLOADING PACKAGES (SKIP IF ALREADY DOWNLOADED)
+## STEP 0.1: DOWNLOADING PACKAGES (SKIP IF ALREADY DOWNLOADED)
 
 Navigate towards Tools \> Install Packages and download the following packages:
 
@@ -25,13 +25,14 @@ if (!require("BiocManager", quietly = TRUE))
 BiocManager::install(version='devel')
 BiocManager::install("flowCore", force = TRUE)
 BiocManager::install("flowAI")
+BiocManager::install("ggcyto")
 
 #use devtools to download packages from github
 devtools::install_github("saeyslab/PeacoQC", force=TRUE)
 devtools::install_github("saeyslab/FlowSOM")
 ```
 
-## STEP 1: READING IN .FCS FILES / .LMD FILES + STANDARDIZING OF NAMES ETC.
+## STEP 0.2: READING IN .LMD FILES + NAME STANDARDIZATION
 
 ```{r}
 library('flowCore') 
@@ -55,63 +56,103 @@ patient_ids <- as.integer(sub(".*[^0-9](\\d+)\\s+tube.*", "\\1", original_ds))
 patient_file_dict <- split(original_ds, patient_ids)
 
 #select which patients you want to extract from? AML, MDS, healthy or fulldataset
-#aml_patients = c(144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
+aml_patients = c(144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
 
 #mds_patients = c(103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211)
 
-healthy_patients = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50)
+#healthy_patients = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50)
 
 #full_dataset = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50,103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
 
+# Identify which patient group is selected
 if (exists("aml_patients")) {
-  fcs_files <- unlist(patient_file_dict[as.character(aml_patients)])
+  selected_patients <- aml_patients
 } else if (exists("mds_patients")) {
-  fcs_files <- unlist(patient_file_dict[as.character(mds_patients)])
+  selected_patients <- mds_patients
 } else if (exists("healthy_patients")) {
-  fcs_files <- unlist(patient_file_dict[as.character(healthy_patients)])
+  selected_patients <- healthy_patients
 } else if (exists("full_dataset")) {
-  fcs_files <- unlist(patient_file_dict[as.character(full_dataset)])
+  selected_patients <- full_dataset
 } else {
   stop("No patient group was defined.")
 }
 
+fcs_files <- unlist(patient_file_dict[as.character(selected_patients)])
+
 fcs_data_list <- list()
 
 #read all .LMD files in folder and save them to fcs_data_list
-for (i in 1:length(fcs_files)) {
-  file_path <- file.path(fcs_dir, fcs_files[i])
-  fcs_data_list[[i]] <- read.FCS(file_path, dataset=2)
+for (id in names(patient_file_dict)) {
+  if (as.integer(id) %in% selected_patients) {
+    file_names <- patient_file_dict[[id]]
+    for (file in file_names) {
+      file_path <- file.path(fcs_dir, file)
+      key <- paste0("ID_", id, "_", tools::file_path_sans_ext(file))
+      fcs_data_list[[key]] <- read.FCS(file_path, dataset = 2) #selecting 3.0 file!
+    }
+  }
 }
 ```
 
-```{r}
-#inspect one file
-ff <- fcs_data_list[[2]]
-#keyword(ff)
-colnames(ff)
+During reading of files it was seen that not all column names were the same. They were displayed in either of two formats below:
+
+```         
+[1] "FS-H"   "FS-A"   "SS-H"   "SS-A"   "FL1-A"  "FL2-A"  "FL3-A"  "FL4-A"  "FL5-A"  "FL6-A"  "FL7-A"  "FL8-A"  "FL9-A"  "FL10-A" "TIME" 
 ```
 
-During compensation it was seen that not all flowFrames had same column names. So to standardize, column names of the fluorochrome channels are standardized.
+```         
+ [1] "FS INT LIN"   "SS INT LIN"   "FL1 INT LOG"  "FL2 INT LOG"  "FL3 INT LOG"  "FL4 INT LOG"  "FL5 INT LOG"  "FL6 INT LOG"  "FL7 INT LOG"  [10] "FL8 INT LOG"  "FL9 INT LOG"  "FL10 INT LOG" "TIME"         "FS PEAK LIN"  "SS PEAK LIN" 
+```
+
+FS-H = front scatter height (peak). Possibly the same as FS PEAK LIN FS-A = front scatter area. Possibly the same as FS INT LIN.
+
+The same is for SS.
+
+To standardize, column names of the fluorochrome channels are standardized to one format for each access.
 
 ```{r}
-#renaming columns
+fs0 <- fcs_data_list[[1]]
+
+colnames(fs0)
+```
+
+```{r}
 rename_common_channels <- function(ff) {
-  standard_names <- c("FITC", "PE", "ECD", "PC5.5", "PC7", "APC", "A700", "A750", "HLA", "KO")
+  standard_names <- c("FITC", "PE", "ECD", "PC5.5", "PC7", 
+                      "APC", "A700", "A750", "HLA", "KO")
   
   old_names <- colnames(ff)
   new_names <- old_names
-  
-  fl_int_log <- paste0("FL", 1:10, " INT LOG")
+
+  #patterns to select fluorophore channels
+  fl_int_patterns <- paste0("^FL", 1:10, " INT")
   fl_dash_a <- paste0("FL", 1:10, "-A")
-  
+
   for (i in seq_along(standard_names)) {
-    match_name <- c(fl_int_log[i], fl_dash_a[i])
-    matched_idx <- which(old_names %in% match_name)
+    matched_idx <- grep(fl_int_patterns[i], old_names)
+    if (length(matched_idx) == 0) {
+      matched_idx <- which(old_names %in% fl_dash_a[i])
+    }
     if (length(matched_idx) > 0) {
       new_names[matched_idx[1]] <- standard_names[i]
     }
   }
+
+  #Renaming scatter channels
+  scatter_renames <- list(
+    "FS INT LIN"   = "FS-A",
+    "FS PEAK LIN"  = "FS-H",
+    "SS INT LIN"   = "SS-A",
+    "SS PEAK LIN"  = "SS-H"
+  )
   
+  for (original in names(scatter_renames)) {
+    idx <- which(old_names == original)
+    if (length(idx) > 0) {
+      new_names[idx] <- scatter_renames[[original]]
+    }
+  }
+
   colnames(ff@exprs) <- new_names
   colnames(ff) <- new_names
   return(ff)
@@ -121,50 +162,27 @@ renamed_fcs_list <- lapply(fcs_data_list, rename_common_channels)
 ```
 
 ```{r}
-#saving renamed .fcs files
-output_dir <- normalizePath("D:/Internship/data/full dataset with renamed columns", mustWork = FALSE)
+fs1 <- renamed_fcs_list[[1]]
+
+colnames(fs1)
+```
+
+Saving renamed files on pc:
+
+```{r}
+output_dir <- normalizePath("D:/Internship/data/renamed full dataset", mustWork = FALSE)
 dir.create(output_dir, showWarnings = FALSE)
 
-clean_file_names <- paste0(tools::file_path_sans_ext(basename(fcs_files)), ".fcs")
-
-if (length(clean_file_names) != length(renamed_fcs_list)) {
-  stop("Length of fsc_files and renamed_fcs_list do not match!")
-}
-
-for (i in seq_along(renamed_fcs_list)) {
-  ff <- renamed_fcs_list[[i]]
-  
-  if (!inherits(ff, "flowFrame")) {
-    warning(paste("Skipping element", i, "— not a valid flowFrame"))
-    next
-  }
-  
-  file_name <- clean_file_names[i]
-  full_path <- file.path(output_dir, file_name)
-  
-  cat("Saving:", full_path, "\n")
-  write.FCS(ff, filename = full_path)
+for (file_name in names(renamed_fcs_list)) {
+  file_path <- file.path(output_dir, paste0(file_name, ".fcs"))
+  write.FCS(renamed_fcs_list[[file_name]], filename = file_path)
 }
 
 ```
 
-#### abbreviations used
+## STEP 1: MANUAL COMPENSATION
 
-FS INT LIN: forward scatter.
-
--   relates to the size of the cell
-
-SS INT LIN: side scatter
-
--   reflects the complexity or granularity of the cell
-
-TIME: duration of cell's passage through the laser beam
-
-PEAK: is used to separate doublets from singlets.
-
-## STEP 2: MANUAL COMPENSATION
-
-Compensation can be done automatically or manually. For this, a **Spillover Spreading Matrix (SSM)** needs to be made. This matrix has been revealed to demonstrate fluorescence spectrum interactions. This compensation of flow cytometry data is essential as it corrects for the overlap of fluorescent signals between different channels.
+Compensation can be done automatically or manually. For this, a **Spillover Spreading Matrix (SSM)** needs to be made. This matrix demonstrates fluorescence spectrum interactions. This compensation of flow cytometry data is essential as it corrects for the overlap of fluorescent signals between different channels.
 
 NOTE: make sure compensation matrix is in fractions and NOT percentages!!
 
@@ -184,7 +202,18 @@ fcs_data_list_comp <- lapply(renamed_fcs_list, function(ff) {
 })
 ```
 
+CHECKING IF COMPENSATION WAS DONE CORRECTLY
+
 ```{r}
+library(flowCore)
+library(ggplot2)
+library(ggcyto)
+
+ff_comp <- fcs_data_list_comp[[1]]
+ff <- renamed_fcs_list[[1]]
+
+autoplot(ff, x = "PE", y = "FITC", bins = 200)
+autoplot(ff_comp, x = "PE", y = "FITC", bins = 200)
 
 ```
 
