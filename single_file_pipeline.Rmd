@@ -1,0 +1,214 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code.
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*.
+
+```{r}
+library('flowCore') 
+library('ggplot2')
+library('flowAI')
+library('readxl')
+library('ggcyto')
+library('openCyto')
+library('flowClust')
+library('flowDensity')
+```
+
+```{r}
+raw_ff <- read.FCS("D:/Internship/data/renamed full dataset/Femoral head 1 tube 2.fcs", transformation = FALSE)
+filename <- "Femoral head 1 tube 2.fcs"
+```
+
+```{r}
+spill <- tryCatch(spillover(raw_ff)[["$SPILLOVER"]], error = function(e) NULL)
+
+if (is.null(spill)) {
+  warning("No spillover matrix found in: ", filename)
+} else {
+  # Exclude non-fluorescence channels (adjust if needed)
+  exclude_channels <- c("FS-A", "FS-H", "SS-A", "SS-H", "TIME", "FS TOF LIN", "SS TOF LIN", "FL7 INT LIN", "FL7 TOF LIN")
+  fluor_channels <- setdiff(colnames(raw_ff), exclude_channels)
+  
+  # Align spillover matrix to match flowFrame column order
+  colnames(spill) <- fluor_channels
+  rownames(spill) <- fluor_channels
+  
+  # Optional: Remove channels like "FL7-W" that might interfere
+  spill_filtered <- spill[setdiff(fluor_channels, "FL7-W"), setdiff(fluor_channels, "FL7-W")]
+
+  # Apply compensation
+  ff_comp <- compensate(raw_ff, spill_filtered)
+
+  # Optional: fix known metadata issues (e.g., missing $TIMESTEP)
+  keyword(ff_comp)[["$TIMESTEP"]] <- 0.000286
+
+  # Now ff_comp is your compensated flowFrame
+  message("Compensation complete for: ", filename)
+}
+```
+
+```{r}
+qc_result <- tryCatch({
+  flow_auto_qc(ff_comp)
+}, error = function(e) {
+  cat("Error in flow_auto_qc for", filename, ":", e$message, "\n")
+  NULL
+})
+
+# If successful, extract cleaned data (depends on the return structure)
+if (!is.null(qc_result)) {
+  # flow_auto_qc typically returns an S4 object with a 'fcs' slot
+  ff_cleaned <- flow_auto_qc(ff_comp)  # <- This may differ depending on the package version
+
+  # Optionally save or plot
+  cat("QC completed for:", filename, "\n")
+}
+```
+
+```{r}
+arcsinh_transform <- function(ff, cofactor = 150, exclude_channels = c("FS-A", "FS-H", "SS-A", "SS-H", "TIME")) {
+  transform_channels <- setdiff(colnames(exprs(ff)), exclude_channels)
+  
+  arcsinh_tf <- transformList(
+    transform_channels,
+    arcsinhTransform(a = 0, b = 1 / cofactor, c = 0)
+  )
+
+  ff_transformed <- transform(ff, arcsinh_tf)
+  
+  return(ff_transformed)
+}
+
+ff_transformed <- arcsinh_transform(ff_cleaned, cofactor = 150)
+```
+
+```{r}
+min_max_quantile_normalize <- function(ff, exclude_channels = c("FS-A", "FS-H", "SS-A", "SS-H", "TIME")) {
+  expr <- exprs(ff)
+  
+  norm_channels <- setdiff(colnames(expr), exclude_channels)
+  
+  expr[, norm_channels] <- apply(expr[, norm_channels, drop = FALSE], 2, function(x) {
+    (x - quantile(x, 0.001, na.rm = TRUE)) / 
+      (quantile(x, 0.999, na.rm = TRUE) - quantile(x, 0.001, na.rm = TRUE))
+  })
+  
+  flowCore::exprs(ff) <- expr
+  return(ff)
+}
+
+ff_norm <- min_max_quantile_normalize(ff_transformed)
+```
+
+```{r}
+autoplot(raw_ff, x = "KO", y = "SS-A", bins = 200)
+```
+
+```{r}
+autoplot(ff_norm, x = "KO", y = "SS-A", bins = 200)
+```
+
+```{r}
+#GATING OUT SCATTER OUTLIERS
+# Front scatter - Side Scatter Gating
+fcs1_compensated_clean_trans_set <- flowSet(list(sample1 = ff_norm))
+gs <- GatingSet(fcs1_compensated_clean_trans_set)
+
+fs_data <- gs_pop_get_data(gs)
+my_gate <- fsApply(fcs1_compensated_clean_trans_set, function(fr) {
+  openCyto:::.flowClust.2d(fr, channels = c("FS-A", "SS-A"), K = 2)
+})
+
+gs_pop_add(gs, my_gate[[1]], parent = "root", name = "my_gate", sampleNames(gs)[1])
+
+recompute(gs)
+
+    Plot the gate
+    p <- autoplot(gs, x = "FS-A", y = "SS-A", "my_gate", bins = 200) + labs(title = 'FSC-A vs. SSC-A: debris removal', x = 'FSC-A', y='SSC-A')
+    print(p)
+
+# Extract the actual gate object (not the list)
+gate_obj <- my_gate[[1]]  # or use names(my_gate) to check the name
+
+# Apply the gate
+ff_gated <- Subset(ff_norm, gate_obj)
+```
+
+```{r}
+is_single <- function(ff, plot = FALSE, ...) {
+  fsc_a <- flowCore::exprs(ff)[,"FS-A"]
+  fsc_h <- flowCore::exprs(ff)[,"FS-H"]
+  
+  bins <- cut(fsc_a, 10)
+  
+  ratios <- fsc_h / fsc_a
+  slope_per_bin <- tapply(ratios, bins, mean)
+  expected_values <- fsc_a * slope_per_bin[bins]
+  deviations <- abs(fsc_h - expected_values)
+  
+  x <- tapply(fsc_a, bins, mean)
+  e <- tapply(expected_values, bins, mean)
+  d <- tapply(deviations, bins, function(x){mean(x) + 2*sd(x)})
+  y <- e - d
+  
+  spl <- splinefun(x, y)
+  
+  if (plot) {
+    flowDensity::plotDens(ff, c("FS-A", "FS-H"), ...)
+    points(x, e, col = "red", pch = 19)
+    points(x, y, col = "red", pch = 19)
+    lines(seq(1, 300000, by = 1000), 
+          spl(seq(1, 300000, by = 1000)),
+          col = "red",
+          lwd = 2)
+  }
+
+  selection <- fsc_h > spl(fsc_a)
+  return(selection)
+}
+
+selection <- is_single(ff_gated, plot=FALSE)
+ff_singles <- ff_gated[selection, ]
+```
+
+```{r}
+# Columns to visualize
+col_to_visualize <- c("FS-A", "FS-H", "SS-A", "KO")
+
+# Extract expression data and round
+expr_gated <- exprs(ff_gated)
+expr_singles <- exprs(ff_singles)
+
+rounded_gated <- as.data.frame(round(expr_gated[, col_to_visualize], 3))
+rounded_singles <- as.data.frame(round(expr_singles[, col_to_visualize], 3))
+
+# Mark all gated events as "Removed" initially
+rounded_gated$Status <- "Removed"
+
+# Mark the ones in singles as "Kept"
+kept <- semi_join(rounded_gated, rounded_singles, by = col_to_visualize)
+kept$Status <- "Kept"
+
+# Find removed (present in gated but NOT in singles)
+removed <- anti_join(rounded_gated, kept, by = col_to_visualize)
+
+# Combine for plotting
+plot_df <- bind_rows(kept, removed)
+
+# Plot
+ggplot(plot_df, aes(x = `FS-A`, y = `FS-H`, color = Status)) +
+  geom_point(size = 0.5, alpha = 0.6) +
+  scale_color_manual(values = c("Kept" = "blue", "Removed" = "red")) +
+  theme_minimal() +
+  labs(title = "Singlet filtering: FSC-A vs FSC-H", x = "FSC-A", y = "FSC-H")
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
