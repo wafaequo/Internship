@@ -15,12 +15,71 @@ library('readxl')
 library('ggcyto')
 library('openCyto')
 library('flowClust')
-library('flowDensity')
 ```
 
 ```{r}
-raw_ff <- read.FCS("D:/Internship/data/renamed full dataset/Femoral head 1 tube 2.fcs", transformation = FALSE)
-filename <- "Femoral head 1 tube 2.fcs"
+raw_ff <- read.FCS("D:/Internship/data/compensated dataset/Ki67-211 tube 2.fcs", transformation = FALSE)
+file_name <- "Ki67-211 tube 2.fcs"
+```
+
+```{r}
+ff <- read.FCS("D:/Internship/data/compensated dataset/Ki67-144 tube 2.fcs", transformation = FALSE)
+file_name <- "Ki67-144 tube 2.fcs"
+```
+
+```{r}
+data.frame(
+  colnames = colnames(exprs(raw_ff)),
+  name = parameters(raw_ff)$name,
+  desc = parameters(raw_ff)$desc
+)
+
+```
+
+```{r}
+p <- parameters(raw_ff)
+p$desc <- p$name
+parameters(raw_ff) <- p
+```
+
+```{r}
+data.frame(
+  colnames = colnames(exprs(raw_ff)),
+  name = parameters(raw_ff)$name,
+  desc = parameters(raw_ff)$desc
+)
+```
+
+```{r}
+exprs_matrix <- exprs(raw_ff)
+any(is.infinite(exprs_matrix))
+```
+
+```{r}
+
+# Now run flow_auto_qc on sorted flowFrame
+cleaned_ff <- tryCatch({
+  debug(flow_auto_qc)
+  flow_auto_qc(raw_ff, verbose = TRUE)
+}, error = function(e) {
+  cat("Error during flow_auto_qc for", file_name, ":", e$message, "\n")
+  NULL
+})
+
+#traceback()
+```
+
+```{r}
+keyword(raw_ff)
+parameters(raw_ff)
+```
+
+```{r}
+keyword(raw_ff)
+```
+
+```{r}
+autoplot(raw_ff, x = "KO", y = "SS-A", bins = 200) + ggtitle("Ki67-145 tube 2_prepro")
 ```
 
 ```{r}
@@ -113,6 +172,12 @@ autoplot(ff_norm, x = "KO", y = "SS-A", bins = 200)
 ```
 
 ```{r}
+#IMPORT TRANSFORMED DATA
+ff_norm <- read.FCS("D:/Internship/data/transformed full dataset/Ki67-145 tube 2.fcs", transformation = FALSE)
+filename <- "Ki67-145 tube 2.fcs"
+```
+
+```{r}
 #GATING OUT SCATTER OUTLIERS
 # Front scatter - Side Scatter Gating
 fcs1_compensated_clean_trans_set <- flowSet(list(sample1 = ff_norm))
@@ -176,6 +241,7 @@ ff_singles <- ff_gated[selection, ]
 ```
 
 ```{r}
+library(dplyr)
 # Columns to visualize
 col_to_visualize <- c("FS-A", "FS-H", "SS-A", "KO")
 

@@ -37,7 +37,7 @@ devtools::install_github("saeyslab/FlowSOM")
 
 The code below selects the patient files based on their patient_id from the .LMD files. The .LMD files contain two versions of .fcs files: Version 3.0 or Version 2.0. In the code below version 3.0 is selected as these contain the spill over matrices for compensation.
 
-*NOTE: preprocessing full dataset can be quite loaded for CPU, better to preprocess in batches.*
+*NOTE: preprocessing full dataset can be heavy for CPU, better to preprocess in batches. + good to save .fcs files after each step as Rstudio may sometimes crash*
 
 ```{r}
 library('flowCore') 
@@ -137,7 +137,7 @@ The column names have been standardized to a consistent format to ensure reliabl
 
 ```{r}
 #CHECKING COLUMN NAMES BEFORE NAME STANDARDIZATION
-fs0 <- fcs_data_list[[1]]
+fs0 <- fcs_data_list[[2]]
 colnames(fs0)
 ```
 
@@ -186,7 +186,7 @@ renamed_fcs_list <- lapply(fcs_data_list, rename_common_channels)
 
 ```{r}
 #CHECKING COLUMN NAMES AFTER STANDARDIZATION
-fs1 <- renamed_fcs_list[[1]]
+fs1 <- renamed_fcs_list[[2]]
 colnames(fs1)
 ```
 
@@ -212,19 +212,22 @@ df_raw <- as.data.frame(exprs(ff_raw))
 
 ```{r}
 #COMPENSATION
+
+#CHANGE REFERENCE LIST DEPENDING ON DISEASE STATE THAT IS PROCESSED
 reference_spillovers <- list(
-  "tube 2" = "Ki67-145 tube 2",
-  "tube 3" = "Ki67-145 tube 3",
-  "tube 4" = "Ki67-145 tube 4",
-  "tube 5" = "Ki67-145 tube 5",
-  "tube 6" = "Ki67-145 tube 6",
-  "tube 7" = "Ki67-145 tube 7"
+  "tube 2" = "Ki67-144 tube 2",
+  "tube 3" = "Ki67-144 tube 3",
+  "tube 4" = "Ki67-144 tube 4",
+  "tube 5" = "Ki67-144 tube 5",
+  "tube 6" = "Ki67-144 tube 6",
+  "tube 7" = "Ki67-144 tube 7"
 )
 
 compensate_ff <- function(ff, filename = NULL, fcs_files = NULL, reference_spillovers = NULL) {
   #skip Tube 1
   if (grepl("tube 1", filename, ignore.case = TRUE)) {
     message("Skipping Tube 1: ", filename)
+    keyword(ff)[["$TIMESTEP"]] <- 0.000286
     return(ff)
   }
   
@@ -275,7 +278,18 @@ ff_comp <- fcs_compensated[[2]]
 df_comp <- as.data.frame(exprs(ff_comp))
 ```
 
-### STEP 1.3 - Quality Check using flowAI
+```{r}
+#SAVING COMPENSATED .FCS FILES
+output_dir <- normalizePath("D:/Internship/data/compensated dataset", mustWork = FALSE)
+dir.create(output_dir, showWarnings = FALSE)
+
+for (file_name in names(fcs_compensated)) {
+  file_path <- file.path(output_dir, paste0(file_name, ".fcs"))
+  write.FCS(fcs_compensated[[file_name]], filename = file_path)
+}
+```
+
+### STEP 1.3 - QUALITY CHECK USING FLOWAI
 
 flowAI is used to remove events having anomalous values when looking at three aspect of a flow cytometry analysis:
 
@@ -300,32 +314,161 @@ The suggestion is to run automatic method first with default settings, if result
 *For Navios cytometer, TIME channel spans 1,048,576 bins (2²⁰) over a default acquisition period of 300 seconds. Therefore, each TIME unit corresponds to approximately 0.000286 seconds (300 ÷ 1,048,576). Multiplying TIME values by this TIMESTEP converts them into meaningful timestamps, enabling proper time-based quality control and analysis.*
 
 ```{r}
-#AUTOMATIC QUALITY CONTROL USING FLOWAI
-fcs_cleaned <- list()
+library('flowCore') 
+library('ggplot2')
+library('flowAI')
+library('readxl')
+library('ggcyto')
+library('openCyto')
+library('flowClust')
+```
 
-for (i in seq_along(fcs_compensated)) {
-  file_name <- names(fcs_compensated)[i]
-  ff <- fcs_compensated[[i]]
-  proceed_flag <- TRUE
+```{r}
+knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
+                      message = FALSE, cache.lazy = FALSE)
+
+fcs_dir <- "D:/Internship/data/compensated dataset/"
+
+#parsing filenames and setting up patient dictionary
+original_ds <- list.files(path=fcs_dir, pattern= '\\.fcs$', full.names=FALSE)
+patient_ids <- as.integer(sub(".*[^0-9](\\d+)\\s+tube.*", "\\1", original_ds))
+patient_file_dict <- split(original_ds, patient_ids)
+
+#select which patients you want to extract: AML, MDS, healthy or fulldataset
+
+#aml_patients = c(144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
+
+mds_patients = c(103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211)
+
+#healthy_patients = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50)
+
+#full_dataset = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50,103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
+
+if (exists("aml_patients")) {
+  selected_patients <- aml_patients
+} else if (exists("mds_patients")) {
+  selected_patients <- mds_patients
+} else if (exists("healthy_patients")) {
+  selected_patients <- healthy_patients
+} else if (exists("full_dataset")) {
+  selected_patients <- full_dataset
+} else {
+  stop("No patient group was defined.")
+}
+
+fcs_file_names <- unlist(patient_file_dict[as.character(selected_patients)])
+fcs_paths <- file.path(fcs_dir, fcs_file_names)
+
+fcs_compensated <- setNames(lapply(fcs_paths, read.FCS, transformation = FALSE), fcs_file_names)
+```
+
+```{r}
+#BEFORE QC DATASET SIZES (CAN BE SEEN AS RAW DATA)
+raw_data_event_counts <- sapply(fcs_compensated, nrow)
+
+raw_data_event_counts_df <- data.frame(
+  Sample = names(raw_data_event_counts),
+  Events = raw_data_event_counts
+)
+```
+
+```{r}
+GbLimit <- 2    
+
+# Calculate size of each file (in GB) using paths
+size_fcs <- file.size(fcs_paths) / 1024^3
+
+# Compute cumulative size and number of groups
+cums <- cumsum(size_fcs)
+groups <- ceiling(sum(size_fcs) / GbLimit)
+
+# Assign each file to a batch based on cumulative size
+batches <- cut(cums, breaks = groups, labels = FALSE)
+
+output_dir <- "D:/Internship/data/cleaned dataset"
+dir.create(output_dir, showWarnings = FALSE)
+
+```
+
+During quality control it was seen that an error occured for some files, this was later seen that it was due to files having event recordings with timestap = 0. These may indicate several things: these events may be from before the acquisition formally started, or instrument reset or failed to stamp time correctly or it might be due to an interrupted run. Because of these facts it was chosen to remove all these files before performing QC
+
+```{r}
+for (i in seq_len(groups)) {
+  cat("\nProcessing batch", i, "\n")
   
-  tryCatch({
-    cleaned_fcs_data <- flow_auto_qc(ff)  # Pass flowFrame directly
-  }, error = function(e) {
-    cat("Error in flow_auto_qc for", file_name, ":", as.character(e$message), "\n")
-    proceed_flag <- FALSE
-  })
+  # Indices of files in this batch
+  batch_indices <- which(batches == i)
 
-  if (proceed_flag) {
-    fcs_cleaned[[file_name]] <- cleaned_fcs_data
-    cat("Cleaned:", file_name, "\n")
+  for (j in batch_indices) {
+    ff <- fcs_compensated[[j]]
+    file_name <- basename(fcs_paths[j])
+    proceed_flag <- TRUE
+
+    # Run flow_auto_qc with error handling
+    cleaned_ff <- tryCatch({
+      flow_auto_qc(ff)
+    }, error = function(e) {
+      cat("Error in flow_auto_qc for", file_name, ":", e$message, "\n")
+      proceed_flag <<- FALSE
+      NULL
+    })
+
+    # Save cleaned file if no error
+    if (proceed_flag && !is.null(cleaned_ff)) {
+      output_fcs_path <- file.path(output_dir, file_name)
+      write.FCS(cleaned_ff, filename = output_fcs_path)
+      cat("Saved cleaned FCS:", output_fcs_path, "\n")
+    }
   }
+
+  # Optional: free memory
+  gc()
 }
 ```
 
 ```{r}
-#CHECKING CLEANED DATA
-ff_cleaned <- fcs_cleaned[[1]]
-df_cleaned <- as.data.frame(exprs(ff_cleaned))
+
+```
+
+```{r}
+#AUTOMATIC QUALITY CONTROL
+
+#choose prefered batch_size for processing
+batch_size <- 5
+
+total_files <- length(fcs_compensated)
+file_names <- names(fcs_compensated)
+output_dir <- "D:/Internship/data/cleaned dataset"
+dir.create(output_dir, showWarnings = FALSE)
+
+#start QC in batches, while saving .fcs files per batch and resetting memory
+for (batch_start in seq(1, total_files, by = batch_size)) {
+  batch_end <- min(batch_start + batch_size - 1, total_files)
+  batch_indices <- batch_start:batch_end
+  cat("\nProcessing batch:", batch_start, "to", batch_end, "\n")
+
+  for (i in batch_indices) {
+    file_name <- file_names[i]
+    ff <- fcs_compensated[[i]]
+    proceed_flag <- TRUE
+
+    tryCatch({
+      cleaned_ff <- flow_auto_qc(ff)
+    }, error = function(e) {
+      cat("Error in flow_auto_qc for", file_name, ":", as.character(e$message), "\n")
+      proceed_flag <- FALSE
+    })
+
+    if (proceed_flag) {
+      output_fcs_path <- file.path(output_dir, paste0(file_name))
+      write.FCS(cleaned_ff, filename = output_fcs_path)
+      cat("Saved cleaned FCS:", output_fcs_path, "\n")
+    }
+  }
+
+  # Optional: Free memory
+  gc()
+}
 ```
 
 ### STEP 1.4 - TRANSFORMATION
@@ -333,6 +476,65 @@ df_cleaned <- as.data.frame(exprs(ff_cleaned))
 Compensation corrects for spectral overlap between fluorochromes but does not address the underlying distribution of flow cytometry data. Such data typically exhibits a positively skewed distribution, especially in fluorescent channels. To make the data more suitable for analysis and visualization, transformation methods—such as logarithmic, biexponential (logicle), or arcsinh—are applied to achieve a more symmetric, near-normal distribution.
 
 In this workflow, an **arcsinh transformation** is applied to the data, followed by **min–max normalization**, in alignment with the methodology described by Duetz et al. (2021).
+
+```{r}
+library('flowCore') 
+library('ggplot2')
+library('flowAI')
+library('readxl')
+library('ggcyto')
+library('openCyto')
+library('flowClust')
+```
+
+```{r}
+knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
+                      message = FALSE, cache.lazy = FALSE)
+
+fcs_dir <- "D:/Internship/data/cleaned dataset/"
+
+#parsing filenames and setting up patient dictionary
+original_ds <- list.files(path=fcs_dir, pattern= '\\.fcs$', full.names=FALSE)
+patient_ids <- as.integer(sub(".*[^0-9](\\d+)\\s+tube.*", "\\1", original_ds))
+patient_file_dict <- split(original_ds, patient_ids)
+
+#select which patients you want to extract: AML, MDS, healthy or fulldataset
+
+#aml_patients = c(144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
+
+mds_patients = c(103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211)
+
+#healthy_patients = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50)
+
+#full_dataset = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50,103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
+
+if (exists("aml_patients")) {
+  selected_patients <- aml_patients
+} else if (exists("mds_patients")) {
+  selected_patients <- mds_patients
+} else if (exists("healthy_patients")) {
+  selected_patients <- healthy_patients
+} else if (exists("full_dataset")) {
+  selected_patients <- full_dataset
+} else {
+  stop("No patient group was defined.")
+}
+
+fcs_file_names <- unlist(patient_file_dict[as.character(selected_patients)])
+fcs_paths <- file.path(fcs_dir, fcs_file_names)
+
+fcs_cleaned <- setNames(lapply(fcs_paths, read.FCS, transformation = FALSE), fcs_file_names)
+```
+
+```{r}
+#BEFORE QC DATASET SIZES (CAN BE SEEN AS RAW DATA)
+QC_data_event_counts <- sapply(fcs_cleaned, nrow)
+
+QC_data_event_counts_df <- data.frame(
+  Sample = names(QC_data_event_counts),
+  Events = QC_data_event_counts
+)
+```
 
 ```{r}
 #ARCSINH TRANSFORMATION
@@ -355,12 +557,6 @@ fcs_transformed <- lapply(fcs_cleaned, arcsinh_transform, cofactor = 150)
 ```{r}
 #CHECKING TRANSFORMED DATA
 ff_trans <- fcs_transformed[[2]]
-
-# Convert to a data frame
-df_trans <- as.data.frame(exprs(ff_trans))
-```
-
-```{r}
 autoplot(ff_trans, x = "KO", y = "SS-A", bins = 200)
 ```
 
@@ -392,12 +588,6 @@ for (i in seq_along(fcs_transformed)) {
 ```{r}
 #CHECKING TRANSFORMED DATA
 ff_norm <- fcs_norm[[2]]
-
-# Convert to a data frame
-df_norm <- as.data.frame(exprs(ff_norm))
-```
-
-```{r}
 autoplot(ff_norm, x = "KO", y = "SS-A", bins = 200)
 ```
 
@@ -441,9 +631,9 @@ patient_file_dict <- split(original_ds, patient_ids)
 
 #select which patients you want to extract: AML, MDS, healthy or fulldataset
 
-aml_patients = c(144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
+#aml_patients = c(144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
 
-#mds_patients = c(103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211)
+mds_patients = c(103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211)
 
 #healthy_patients = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50)
 
@@ -465,6 +655,15 @@ fcs_file_names <- unlist(patient_file_dict[as.character(selected_patients)])
 fcs_paths <- file.path(fcs_dir, fcs_file_names)
 
 fcs_files <- setNames(lapply(fcs_paths, read.FCS, transformation = FALSE), fcs_file_names)
+```
+
+```{r}
+#BEFORE GATING DATASET SIZES (CAN BE SEEN AS TRANSFORMED DATA)
+raw_data_event_counts <- sapply(fcs_files, nrow)
+raw_data_event_counts_df <- data.frame(
+  Sample = names(raw_data_event_counts),
+  Events = raw_data_event_counts
+)
 ```
 
 ### STEP 2.2 - Gating out scatter outliers
@@ -513,6 +712,16 @@ fcs_gated <- mapply(Subset, fcs_files, my_gates, SIMPLIFY = FALSE)
 #CHECKING GATED DATA
 ff_gated <- fcs_gated[[2]]
 df_gated <- as.data.frame(exprs(ff_gated))
+```
+
+```{r}
+#AFTER GATING DATASET SIZES
+gated_data_event_counts <- sapply(fcs_gated, nrow)
+gated_data_event_counts_df <- data.frame(
+  Sample = names(gated_data_event_counts),
+  Events = gated_data_event_counts
+)
+
 ```
 
 ### STEP 2.3 - Removing doublets
@@ -568,11 +777,16 @@ fcs_singles <- mapply(function(ff, sel) {
 ```{r}
 #INSPECTING DOUBLET REMOVED DATA
 ff_single <- fcs_singles[[2]]
-df_single <- as.data.frame(exprs(ff_single))
+autoplot(ff_single, x = "KO", y = "SS-A", bins = 200)
 ```
 
 ```{r}
-autoplot(ff_single, x = "KO", y = "SS-A", bins = 200)
+#AFTER DOUBLET REMOVAL DATASET SIZES
+single_data_event_counts <- sapply(fcs_singles, nrow)
+single_data_event_counts_df <- data.frame(
+  Sample = names(single_data_event_counts),
+  Events = single_data_event_counts
+)
 ```
 
 ### STEP 2.4 - Saving preprocessed files
@@ -586,7 +800,7 @@ dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
 for (name in names(fcs_singles)) {
   ff <- fcs_singles[[name]]
-  filename <- file.path(out_dir, paste0(tools::file_path_sans_ext(name), "_prepro.fcs"))
+  filename <- file.path(out_dir, paste0(tools::file_path_sans_ext(name)))
   write.FCS(ff, filename)
   cat("Saved:", filename, "\n")
 }
@@ -600,8 +814,8 @@ library(ggplot2)
 library(dplyr)
 
 #which .fcs file do you want to visualize?
-raw_ff <- read.FCS("D:/Internship/data/transformed full dataset/Femoral head 1 tube 2.fcs", transformation = FALSE)
-preprocessed_ff <- read.FCS("D:/Internship/data/preprocessed dataset/Femoral head 1 tube 2_prepro.fcs", transformation = FALSE)
+raw_ff <- read.FCS("D:/Internship/data/transformed full dataset/Ki67-145 tube 2.fcs", transformation = FALSE)
+preprocessed_ff <- read.FCS("D:/Internship/data/preprocessed dataset/Ki67-145 tube 2_prepro.fcs", transformation = FALSE)
 
 #which columns do you want to visualize?
 col_to_visualize <- c("FS-H", "FS-A", "SS-A", "KO")
@@ -635,13 +849,189 @@ ggplot(plot_df, aes(x = `KO`, y = `SS-A`, color = Status)) +
 autoplot(preprocessed_ff, x = "KO", y = "SS-A", bins = 200)
 ```
 
-## STEP 3: APPLYING FLOWSOM
-
-wdhiuehdud
+## STEP 3: EDA AFTER PREPROCESSING
 
 ```{r}
-#FlowSOM fuction
-names(flow_frame)
+library('flowCore') 
+library('ggplot2')
+library('flowAI')
+library('readxl')
+library('ggcyto')
+library('openCyto')
+library('flowClust')
+library(dplyr)
+```
+
+```{r}
+knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
+                      message = FALSE, cache.lazy = FALSE)
+
+fcs_dir <- "D:/Internship/data/preprocessed dataset/"
+
+#parsing filenames and setting up patient dictionary
+original_ds <- list.files(path=fcs_dir, pattern= '\\.fcs$', full.names=FALSE)
+patient_ids <- as.integer(sub(".*[^0-9](\\d+)\\s+tube.*", "\\1", original_ds))
+patient_file_dict <- split(original_ds, patient_ids)
+
+#select which patients you want to extract: AML, MDS, healthy or fulldataset
+
+#aml_patients = c(144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
+
+mds_patients = c(103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211)
+
+#healthy_patients = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50)
+
+#full_dataset = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50,103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
+
+if (exists("aml_patients")) {
+  selected_patients <- aml_patients
+} else if (exists("mds_patients")) {
+  selected_patients <- mds_patients
+} else if (exists("healthy_patients")) {
+  selected_patients <- healthy_patients
+} else if (exists("full_dataset")) {
+  selected_patients <- full_dataset
+} else {
+  stop("No patient group was defined.")
+}
+
+fcs_file_names <- unlist(patient_file_dict[as.character(selected_patients)])
+fcs_paths <- file.path(fcs_dir, fcs_file_names)
+
+fcs_files <- setNames(lapply(fcs_paths, read.FCS, transformation = FALSE), fcs_file_names)
+```
+
+```{r}
+#SAVING EVENT COUNT AS EXCEL
+event_count <- sapply(fcs_files, nrow)
+event_count_df <- data.frame(
+  Sample = names(event_count),
+  Events = event_count
+)
+
+#change filename to what you selected
+write.csv(event_count_df, "D:/Internship/data/mds_patients_prepro.csv", row.names = FALSE)
+
+```
+
+## STEP 4: AGGREGATE FILES
+
+```{r}
+library('flowCore') 
+library('ggplot2')
+library('flowAI')
+library('readxl')
+library('ggcyto')
+library('openCyto')
+library('flowClust')
+library(dplyr)
+```
+
+```{r}
+
+```
+
+```{r}
+tubes <- paste0("tube ", 1:7)
+fcs_dir <- "D:/Internship/data/preprocessed dataset/healthy/"
+output_dir <- "D:/Internship/data/results/"
+dir.create(output_dir, showWarnings = FALSE)
+
+aggregate_cells <- 500000
+set.seed(2020)
+
+all_fcs_files <- list.files(fcs_dir, pattern = "\\.fcs$", full.names = FALSE)
+```
+
+```{r}
+# Loop per tube
+for (tube in tubes) {
+  cat("🔄 Processing", tube, "...\n")
+  
+  # Filter files that contain the tube string (case insensitive)
+  tube_file_names <- all_fcs_files[grepl(tube, all_fcs_files, ignore.case = TRUE)]
+  
+  if (length(tube_file_names) == 0) {
+    warning(paste("⚠️ No files found for", tube, "- skipping."))
+    next
+  }
+  
+  # Create full file paths
+  tube_file_paths <- file.path(fcs_dir, tube_file_names)
+  
+  # Aggregate
+  agg <- FlowSOM::AggregateFlowFrames(
+    fileNames = tube_file_paths,
+    cTotal = aggregate_cells,
+    writeOutput = TRUE,
+    outputFile = file.path(output_dir, paste0(tube, "_aggregate.fcs"))
+  )
+  
+  cat("✅ Aggregated", length(tube_file_paths), "files for", tube, "\n")
+}
+```
+
+```{r}
+#RENAMING COLUMNS PER TUBE TO WHAT THEY REPRESENT
+ff <- read.FCS("D:/Internship/data/results/tube 7_aggregate.fcs")
+colnames(ff)
+```
+
+```{r}
+colnames(ff) <- c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "NA1", "NA2", "Bcl-2", "CD33", "CD117",  "CD36", "NA3", "NA4", "HLA-DR", "CD45", "TIME", "File", "File_scattered", "Original_ID")
+
+write.FCS(ff, filename = "D:/Internship/data/results/tube 7_final.fcs")
+```
+
+## STEP 5: APPLYING FLOWSOM
+
+```{r}
+library('flowCore') 
+library('ggplot2')
+library('flowAI')
+library('readxl')
+library('ggcyto')
+library('openCyto')
+library('flowClust')
+library(dplyr)
+```
+
+```{r}
+fcs_files_dir <- "D:/Internship/data/results/"
+all_fcs_files <- list.files(fcs_files_dir, pattern = "\\.fcs$", full.names = FALSE)
+```
+
+```{r}
+flow_frame <- read.FCS("D:/Internship/data/results/tube 6_final.fcs")
+colnames(flow_frame)
+df <- as.data.frame(exprs(flow_frame))
+```
+
+```{r}
+dir_results <- "D:/Internship/data/results/"
+SOM_x <- 15 
+SOM_y <- 15 
+n_meta <- 30 
+seed <- 2020 
+scaling <- FALSE
+```
+
+```{r}
+library(FlowSOM)
+fsom <- FlowSOM(input = flow_frame, scale = scaling, 
+                colsToUse = c(6,8,9, 11:14),
+                seed = seed, 
+                nClus = n_meta, 
+                xdim = SOM_x, 
+                ydim = SOM_y)
+```
+
+```{r}
+p <- PlotStars(fsom = fsom, backgroundValues = fsom$metaclustering, maxNodeSize=2.5)
+ggsave(filename = paste0(dir_results, "fsom_tree_tube6.pdf"), plot = p, height = 8.5, width = 11)
+```
+
+```{r}
 fSOM <- FlowSOM(flow_frame, compensate = FALSE, transform = FALSE, 
                 toTransform = c(4:16), 
                 scale = TRUE,
@@ -679,4 +1069,7 @@ fig <- plot_ly(test, x = ~`PE-A`, y = ~`SSC-A`, z = ~`V500-C-A`, type = "scatter
                size = 0.01)
 
 fig
+```
+
+```         
 ```
