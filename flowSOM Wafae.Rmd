@@ -849,7 +849,7 @@ ggplot(plot_df, aes(x = `KO`, y = `SS-A`, color = Status)) +
 autoplot(preprocessed_ff, x = "KO", y = "SS-A", bins = 200)
 ```
 
-## STEP 3: EDA AFTER PREPROCESSING
+## STEP 3: EXTRACTING EVENT COUNTS FOR EDA
 
 ```{r}
 library('flowCore') 
@@ -916,6 +916,8 @@ write.csv(event_count_df, "D:/Internship/data/mds_patients_prepro.csv", row.name
 
 ## STEP 4: AGGREGATE FILES
 
+We aggregate files per tube for all patients within one disease group. This way we end up with 7 .fcs files representing the 7 tubes measured for that specific disease state. This aggregated file is established by randomly selecting 40,000 cells across all patient .fcs files to ensure representative sampling. This aggregation step was necessary, as the FlowSOM algorithm requires a single .fcs file as input for training and clustering.
+
 ```{r}
 library('flowCore') 
 library('ggplot2')
@@ -928,27 +930,21 @@ library(dplyr)
 ```
 
 ```{r}
-
-```
-
-```{r}
 tubes <- paste0("tube ", 1:7)
 fcs_dir <- "D:/Internship/data/preprocessed dataset/healthy/"
 output_dir <- "D:/Internship/data/results/"
 dir.create(output_dir, showWarnings = FALSE)
 
-aggregate_cells <- 500000
+aggregate_cells <- 40000
 set.seed(2020)
 
 all_fcs_files <- list.files(fcs_dir, pattern = "\\.fcs$", full.names = FALSE)
 ```
 
 ```{r}
-# Loop per tube
 for (tube in tubes) {
   cat("🔄 Processing", tube, "...\n")
   
-  # Filter files that contain the tube string (case insensitive)
   tube_file_names <- all_fcs_files[grepl(tube, all_fcs_files, ignore.case = TRUE)]
   
   if (length(tube_file_names) == 0) {
@@ -956,10 +952,9 @@ for (tube in tubes) {
     next
   }
   
-  # Create full file paths
   tube_file_paths <- file.path(fcs_dir, tube_file_names)
   
-  # Aggregate
+  #perform aggregation per tube
   agg <- FlowSOM::AggregateFlowFrames(
     fileNames = tube_file_paths,
     cTotal = aggregate_cells,
@@ -977,8 +972,24 @@ ff <- read.FCS("D:/Internship/data/results/tube 7_aggregate.fcs")
 colnames(ff)
 ```
 
+These are the names of the columns per tube:
+
+-   **Tube 1:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "IgG1-1", "NA1", "IgG1-2", "CD13", "CD117", "CD34", "NA2", "NA3", "HLA-DR", "CD45", "TIME", "File", "File_scattered", "Original_ID")
+
+-   **Tube 2:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "Ki-67", "CD14", "CD-64", "CD-13", "CD117", "CD34", "CD10", "CD11b", "HLA-DR", "CD45", "TIME", "File", "File_scattered", "Original_ID")
+
+-   **Tube 3:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "Ki-67", "CD105", "CD123", "CD33", "CD117", "NA1", "CD71", "CD235a", "HLA-DR", "CD45", "TIME", "File", "File_scattered", "Original_ID")
+
+-   **Tube 4:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A","Ki-67", "NA1","NA2","CD33", "CD117", "NA3", "NA4", "NA5","HLA-DR", "CD45", "TIME", "File", "File_scattered", "Original_ID")
+
+-   **Tube 5:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "CD16", "CD64", "Bcl-2", "CD13", "CD117", "CD34", "CD10", "CD14", "HLA-DR", "CD45", "TIME", "File", "File_scattered", "Original_ID")
+
+-   **Tube 6:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "NA1", "CD105", "Bcl-2", "CD33", "CD117", "NA2", "CD71", "CD235a", "HLA-DR", "CD45", "TIME", "File", "File_scattered", "Original_ID")
+
+-   **Tube 7:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "NA1", "NA2", "Bcl-2", "CD33", "CD117", "CD36", "NA3","NA4", "HLA-DR", "CD45", "TIME", "File", "File_scattered", "Original_ID")
+
 ```{r}
-colnames(ff) <- c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "NA1", "NA2", "Bcl-2", "CD33", "CD117",  "CD36", "NA3", "NA4", "HLA-DR", "CD45", "TIME", "File", "File_scattered", "Original_ID")
+colnames(ff) <- c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "NA1", "NA2", "Bcl-2", "CD33", "CD117", "CD36", "NA3","NA4", "HLA-DR", "CD45", "TIME", "File", "File_scattered", "Original_ID")
 
 write.FCS(ff, filename = "D:/Internship/data/results/tube 7_final.fcs")
 ```
@@ -997,78 +1008,103 @@ library(dplyr)
 ```
 
 ```{r}
-fcs_files_dir <- "D:/Internship/data/results/"
-all_fcs_files <- list.files(fcs_files_dir, pattern = "\\.fcs$", full.names = FALSE)
+flow_frame <- read.FCS("D:/Internship/data/results/tube 2_final.fcs")
+colnames(flow_frame)
 ```
 
+SSC-A is important for gating, so we will use it as a parameter in the FlowSOM algorithm. However, before we do so, we need to transform this data in order to align with the other channels.
+
 ```{r}
-flow_frame <- read.FCS("D:/Internship/data/results/tube 6_final.fcs")
-colnames(flow_frame)
-df <- as.data.frame(exprs(flow_frame))
+#Define reference marker
+reference_marker <- "CD45"
+
+expr <- exprs(flow_frame)
+if (!(reference_marker %in% colnames(expr)) || !("SSC-A" %in% colnames(expr))) {
+  stop("Reference marker or SSC-A not found in the flowFrame.")
+}
+
+q5_goal   <- quantile(expr[, reference_marker], 0.05, na.rm = TRUE)
+q95_goal  <- quantile(expr[, reference_marker], 0.95, na.rm = TRUE)
+q5_SSCA   <- quantile(expr[, "SSC-A"], 0.05, na.rm = TRUE)
+q95_SSCA  <- quantile(expr[, "SSC-A"], 0.95, na.rm = TRUE)
+SSCA_a <- (q95_goal - q5_goal) / (q95_SSCA - q5_SSCA)
+SSCA_b <- q5_goal - SSCA_a * q5_SSCA
+
+#linear transformation
+lin_trans <- transformList("SSC-A", linearTransform(a = SSCA_a, b = SSCA_b))
+flow_frame <- transform(flow_frame, lin_trans)
+
+#Min-Max normalization
+min_max_ssca_only <- function(ff) {
+  expr <- exprs(ff)
+  
+  if (!"SSC-A" %in% colnames(expr)) {
+    stop("SSC-A channel not found in the flowFrame.")
+  }
+  
+  # Compute quantiles for normalization
+  q_min <- quantile(expr[, "SSC-A"], 0.001, na.rm = TRUE)
+  q_max <- quantile(expr[, "SSC-A"], 0.999, na.rm = TRUE)
+  
+  # Apply min-max normalization
+  expr[, "SSC-A"] <- (expr[, "SSC-A"] - q_min) / (q_max - q_min)
+  
+  # Cap values between 0 and 1 (optional, but recommended)
+  expr[, "SSC-A"] <- pmin(pmax(expr[, "SSC-A"], 0), 1)
+  
+  # Update and return normalized flowFrame
+  flowCore::exprs(ff) <- expr
+  return(ff)
+}
+
+ff_transformed <- min_max_ssca_only(flow_frame)
 ```
 
 ```{r}
 dir_results <- "D:/Internship/data/results/"
 SOM_x <- 15 
 SOM_y <- 15 
-n_meta <- 30 
+n_meta <- 10 
 seed <- 2020 
 scaling <- FALSE
+
+df_flow_frame <- as.data.frame(exprs(ff_transformed))
 ```
 
 ```{r}
 library(FlowSOM)
-fsom <- FlowSOM(input = flow_frame, scale = scaling, 
-                colsToUse = c(6,8,9, 11:14),
+fsom <- FlowSOM(input = ff_transformed, scale = scaling, 
+                colsToUse = c(4:14),
                 seed = seed, 
                 nClus = n_meta, 
                 xdim = SOM_x, 
                 ydim = SOM_y)
 ```
 
+Plot the FlowSOM tree structure to visualize the clustering results. The `PlotStars` function generates a star plot, which is a common way to visualize FlowSOM results, showing the clusters and their relationships.
+
 ```{r}
 p <- PlotStars(fsom = fsom, backgroundValues = fsom$metaclustering, maxNodeSize=2.5)
-ggsave(filename = paste0(dir_results, "fsom_tree_tube6.pdf"), plot = p, height = 8.5, width = 11)
+ggsave(filename = paste0(dir_results, "fsom_tree_tube2.pdf"), plot = p, height = 8.5, width = 11)
 ```
 
+Create a report summarizing the FlowSOM results, including cluster information and visualizations. The `FlowSOMmary` function generates a comprehensive report that can be saved as a PDF file.
+
 ```{r}
-fSOM <- FlowSOM(flow_frame, compensate = FALSE, transform = FALSE, 
-                toTransform = c(4:16), 
-                scale = TRUE,
-                colsToUse = c(4, 5, 7, 8, 10, 11, 12), xdim = 6, ydim = 6, nClus = 8,
-                seed = 42, rlen = 140)
-?FlowSOM
-?BuildMST
-#Building the selforganizing map
-fSOM <- BuildSOM(fSOM, c(4, 5, 7, 8, 10, 11, 12), xdim = 6, ydim = 
-                   6, rlen = 140)
-str(fSOM$map, max.level = 2)
+FlowSOMmary(fsom, plotFile = "D:/Internship/data/results/fsom_tree_tube2_report.pdf")
+```
 
-#Building the minimal spanning tree
-fSOM <- BuildMST(fSOM, tSNE= FALSE)
-str(fSOM$MST)
+### Inspecting cells in 2D scatterplots
 
-#Plot the graph
-PlotStars(fSOM, backgroundValues = fSOM$metaclustering, equalNodeSize = TRUE)
-?PlotStars
-PlotNumbers(fSOM,maxNodeSize = 0.4,equalNodeSize = TRUE)
+before we interpret the FlowSOM clutering, we need to make sure clustering was done correctly. There does not exist a single comprehensive metric to assess the quality, however different visualizations and scores can help to verify the FlowSOM results.
 
-Plot2DScatters(fSOM, channelpairs = list(c("V500-C-A", "SSC-A")), 
-               metaclusters = c(1,2,3,4,5), 
-               plotFile = "ps+pmma, NR & Ritdye (rlen = 140, xy =100).png", 
-               density = FALSE, 
-               centers = FALSE)
+```{r}
+channel_pairs = list(c("CD34", "CD45"), c("CD45", "SSC-A"), c("CD14", "SSC-A"), c("CD14", "Ki-67"), c("HLA-DR", "CD117"), c("CD-13", "SSC-A")) 
 
-#FlowSOM Report
-FlowSOMmary(fSOM, plotFile = "FlowSOM pmma + ps (No NR).pdf")
+metaclusters_of_interest <- seq_len(n_meta) 
+clusters_of_interest <- NULL
 
-
-test <- as.data.frame(flow_frame@exprs)
-test$`V500-C-A`
-fig <- plot_ly(test, x = ~`PE-A`, y = ~`SSC-A`, z = ~`V500-C-A`, type = "scatter3d",
-               size = 0.01)
-
-fig
+Plot2DScatters(fsom = fsom, channelpairs = channel_pairs, metaclusters = metaclusters_of_interest, clusters = clusters_of_interest, plotFile = paste0(dir_results, "fsom_2D_scatters.png"), centers = FALSE, density=FALSE)
 ```
 
 ```         
