@@ -1,0 +1,113 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+## 1. READING FILE AND VISUALISING TWO MARKERS
+
+```{r}
+library('flowCore')  
+library('ggplot2')
+library('flowAI')
+library('readxl')
+library('ggcyto')
+library('openCyto')
+library('flowClust')
+```
+
+```{r}
+#SELECT WHICH FILE YOU WANT TO VISUALIZE
+raw_ff <- read.FCS("D:/Internship/data/5. preprocessed dataset/mds/Ki67-104 tube 2.fcs", transformation = FALSE)
+```
+
+```{r}
+#VISUALISATION
+ggcyto(raw_ff, aes(x = `KO`, y = `SS-A`)) +
+  geom_hex(bins = 128) +
+  labs(title = "FSC-A vs SSC-A (preprocessed)",
+       x = "CD45", y = "SS-A") +
+  theme_minimal()
+```
+
+## 2. VISUALISING DEBRIS REMOVAL STEP
+
+```{r}
+#SELECT FILE BEFORE AND AFTER DEBRIS REMOVAL
+before_ff <- read.FCS("D:/Internship/data/4. transformed full dataset/Femoral head 2 tube 3.fcs.fcs", transformation = FALSE)
+after_ff <- read.FCS("D:/Internship/data/5. preprocessed dataset/healthy/Femoral head 2 tube 3.fcs", transformation = FALSE)
+```
+
+```{r}
+ggcyto(before_ff, aes(x = `FS-A`, y = `SS-A`)) +
+  geom_hex(bins = 128) +
+  labs(title = "FSC-A vs SSC-A (Before debris removal)",
+       x = "FS-A", y = "SS-A") +
+  theme_minimal()
+```
+
+## 3. VISUALISATION SINGLET REMOVAL
+
+```{r}
+before_ff <- read.FCS("D:/Internship/data/4. transformed full dataset/Femoral head 2 tube 3.fcs.fcs", transformation = FALSE)
+
+is_single <- function(ff, plot = FALSE, ...) {
+  fsc_a <- flowCore::exprs(ff)[,"FS-A"]
+  fsc_h <- flowCore::exprs(ff)[,"FS-H"]
+  
+  bins <- cut(fsc_a, 10)
+  
+  ratios <- fsc_h / fsc_a
+  slope_per_bin <- tapply(ratios, bins, mean)
+  expected_values <- fsc_a * slope_per_bin[bins]
+  deviations <- abs(fsc_h - expected_values)
+  
+  x <- tapply(fsc_a, bins, mean)
+  e <- tapply(expected_values, bins, mean)
+  d <- tapply(deviations, bins, function(x){mean(x) + 2*sd(x)})
+  
+  lower_y <- e - d
+  upper_y <- e + d
+  
+  lower_spl <- splinefun(x, lower_y)
+  upper_spl <- splinefun(x, upper_y)
+  
+  selection <- fsc_h > lower_spl(fsc_a) & fsc_h < upper_spl(fsc_a)
+  return(selection)
+}
+
+selection <- is_single(before_ff, plot=FALSE)
+ff_singles <- before_ff[selection, ]
+```
+
+```{r}
+library(dplyr)
+# Columns to visualize
+col_to_visualize <- c("FS-A", "FS-H", "SS-A", "KO")
+
+# Extract expression data and round
+expr_gated <- exprs(before_ff)
+expr_singles <- exprs(ff_singles)
+
+rounded_gated <- as.data.frame(round(expr_gated[, col_to_visualize], 3))
+rounded_singles <- as.data.frame(round(expr_singles[, col_to_visualize], 3))
+
+# Mark all gated events as "Removed" initially
+rounded_gated$Status <- "Removed"
+
+# Mark the ones in singles as "Kept"
+kept <- semi_join(rounded_gated, rounded_singles, by = col_to_visualize)
+kept$Status <- "Kept"
+
+# Find removed (present in gated but NOT in singles)
+removed <- anti_join(rounded_gated, kept, by = col_to_visualize)
+
+# Combine for plotting
+plot_df <- bind_rows(kept, removed)
+
+# Plot
+ggplot(plot_df, aes(x = `FS-A`, y = `FS-H`, color = Status)) +
+  geom_point(size = 0.5, alpha = 0.6) +
+  scale_color_manual(values = c("Kept" = "blue", "Removed" = "red")) +
+  theme_minimal() +
+  labs(title = "Singlet filtering: FSC-A vs FSC-H", x = "FSC-A", y = "FSC-H")
+```
