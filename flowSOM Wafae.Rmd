@@ -33,11 +33,13 @@ devtools::install_github("saeyslab/PeacoQC", force=TRUE)
 devtools::install_github("saeyslab/FlowSOM")
 ```
 
+# PREPROCESSING
+
 ## STEP 1: PREPROCESSING: STANDARDIZATION + TRANSFORMATION STEPS.
 
-The code below selects the patient files based on their patient_id from the .LMD files. The .LMD files contain two versions of .fcs files: Version 3.0 or Version 2.0. In the code below version 3.0 is selected as these contain the spill over matrices for compensation.
+The code below selects the patient files based on their patient_id from the .LMD files. The .LMD files contain two versions of .fcs files: Version 3.0 or Version 2.0. In this pipeline version 3.0 is selected as these contain the spillover matrices for compensation.
 
-*NOTE: preprocessing full dataset can be heavy for CPU, better to preprocess in batches. + good to save .fcs files after each step as Rstudio may sometimes crash*
+*NOTE: preprocessing full dataset can be heavy for CPU, better to preprocess in batches. + good to save .fcs files after each step as Rstudio may sometimes crash.*
 
 ```{r}
 library('flowCore') 
@@ -47,76 +49,52 @@ library('readxl')
 library('ggcyto')
 library('openCyto')
 library('flowClust')
+library('glue')
 ```
 
 ```{r}
 knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
                       message = FALSE, cache.lazy = FALSE)
 
-fcs_dir <- "D:/Internship/data/0. full dataset/"
+#select patientmap you want to preprocess
+patient_group <- 'aml' #healthy BM/mds/aml
+fcs_dir <- paste0("D:/Internship/data/0. full dataset/", patient_group)
 
-#parsing filenames and setting up patient dictionary
-original_ds <- list.files(path=fcs_dir, pattern= '\\.LMD$', full.names=FALSE)
-patient_ids <- as.integer(sub(".*[^0-9](\\d+)\\s+tube.*", "\\1", original_ds))
-patient_file_dict <- split(original_ds, patient_ids)
+if (!dir.exists(fcs_dir)) stop("Directory does not exist: ", fcs_dir)
 
-#select which patients you want to extract: AML, MDS, healthy or full dataset
-aml_patients = c(144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
+#which files are present in the dir
+fcs_files <- list.files(path = fcs_dir, pattern = "\\.LMD$", full.names = TRUE)
 
-#mds_patients = c(103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211)
-
-#healthy_patients = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50,51)
-
-#full_dataset = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50,103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
-
-if (exists("aml_patients")) {
-  selected_patients <- aml_patients
-} else if (exists("mds_patients")) {
-  selected_patients <- mds_patients
-} else if (exists("healthy_patients")) {
-  selected_patients <- healthy_patients
-} else if (exists("full_dataset")) {
-  selected_patients <- full_dataset
-} else {
-  stop("No patient group was defined.")
-}
-
-
-fcs_files <- unlist(patient_file_dict[as.character(selected_patients)])
+#extracting files
 fcs_data_list <- list()
 
-for (id in names(patient_file_dict)) {
-  if (as.integer(id) %in% selected_patients) {
-    file_names <- patient_file_dict[[id]]
-    
-    for (file in file_names) {
-      file_path <- file.path(fcs_dir, file)
-      key <- tools::file_path_sans_ext(file)
+for (file_path in fcs_files) {
+  key <- tools::file_path_sans_ext(basename(file_path))
+  
+  dataset_index <- NULL
+  
+  for (i in 1:2) {
+    tryCatch({
+      ff_try <- suppressWarnings(read.FCS(file_path, dataset = i))
       
-      dataset_index <- NULL
+      version_keys <- grep("version", names(ff_try@description), ignore.case = TRUE, value = TRUE)
       
-      for (i in 1:2) {
-        tryCatch({
-          ff_try <- suppressWarnings(read.FCS(file_path, dataset = i))
-          
-          version_keys <- grep("version", names(ff_try@description), ignore.case = TRUE, value = TRUE)
-          
-          if (length(version_keys) > 0) {
-            fcs_version <- ff_try@description[[version_keys[1]]]
-            
-            if (grepl("^3(\\.0)?$", fcs_version)) {
-              fcs_data_list[[key]] <- ff_try
-              dataset_index <- i
-              break
-            }
-          }
-        }, error = function(e) {})
+      if (length(version_keys) > 0) {
+        fcs_version <- ff_try@description[[version_keys[1]]]
+        
+        if (grepl("^3(\\.0)?$", fcs_version)) {
+          fcs_data_list[[key]] <- ff_try
+          dataset_index <- i
+          break
+        }
       }
-      
-      if (is.null(dataset_index)) {
-        warning(paste("FCS version 3.0 not found for file:", file))
-      }
-    }
+    }, error = function(e) {
+      message(glue("Error reading {basename(file_path)} (dataset {i}): {e$message}"))
+    })
+  }
+  
+  if (is.null(dataset_index)) {
+    warning(glue("FCS version 3.0 not found for file: {basename(file_path)}"))
   }
 }
 ```
@@ -212,11 +190,11 @@ PPS. In cases where tubes other than Tube 1 do not contain a valid spillover mat
 
 -   for mds patient 103 was used as reference.
 
--   for aml patient
+-   for aml patient 145 was used as reference.
 
 ```{r}
 #CHECKING RAW DATA
-ff_raw <- renamed_fcs_list[[40]]
+ff_raw <- renamed_fcs_list[[2]]
 df_raw <- as.data.frame(exprs(ff_raw))
 ```
 
@@ -289,7 +267,10 @@ df_comp <- as.data.frame(exprs(ff_comp))
 
 ```{r}
 #SAVING COMPENSATED .FCS FILES
-output_dir <- normalizePath("D:/Internship/data/2. compensated dataset", mustWork = FALSE)
+output_dir <- normalizePath(
+  file.path("D:/Internship/data/2. compensated dataset", patient_group),
+  mustWork = FALSE
+)
 dir.create(output_dir, showWarnings = FALSE)
 
 for (file_name in names(fcs_compensated)) {
@@ -298,29 +279,9 @@ for (file_name in names(fcs_compensated)) {
 }
 ```
 
-### STEP 1.3 - QUALITY CHECK USING FLOWAI
+### STEP 1.3 - QUALITY CHECK USING PEACOQC
 
-flowAI is used to remove events having anomalous values when looking at three aspect of a flow cytometry analysis:
-
-1.  **flow rate**: Checks whether cells are passing through the flow cytometer at an appropriate rate. Anomalies could be due to clumping of cells, clogging or incorrect flow rate settings. A high percentages suggests that cells may be analyzed under suboptimal flow conditions.
-
-    -   This step uses *generalized ESD* to detect outliers. See [this link](https://www.itl.nist.gov/div898/handbook/eda/section3/eda35h3.htm) for further explanation of this test.
-
-2.  **signal acquisition**: accounts for fluorescence and scatter signal of cells. Anomalies can arise due to inadequate staining, photobleaching etc. A substantial proportion of cells with anomalous signal acquisition can lead to inaccurate fluorescence intensity measurements, affecting the interpretation of the data.
-
-    -   Uses *Binary Segmentation* to check for changepoints and remove instable regions
-
-3.  **dynamic range**: Evaluates whether intensities of cells fall within detectable range of cytometer. Cells outside this range can either be too dim (below detection limit) or too bright (causing signal saturation), both of which can skew data interpretation.
-
-    -   Filter out all measurements above hard upper limit and removes all negative scatter values. For fluorescent channels, it removed outliers of negative range.
-
-Several arguments can be changed within `flow_auto_qc` to improve quality control results. Moreover, `remove_from` can be used to perform partial quality control on only one or two of the above mentioned properties.
-
-The suggestion is to run automatic method first with default settings, if results are not satisfying, we can modify arguments.
-
-*NOTE: TIMESTEP IS NOT PRESENT IN .fcs FILE. In [NAVIOS TETRA MANUAL](chrome-extension://efaidnbmnnnibpcajpcglclefindmkaj/https://4.imimg.com/data4/MJ/IL/MY-4372999/navios-flow-cytometer.pdf), the TIME parameter reflects the timing of each event as unitless integers representing time bins, rather than actual seconds. To convert these values into real-time units, TIMESTEP must be applied as scaling factor.*
-
-*For Navios cytometer, TIME channel spans 1,048,576 bins (2²⁰) over a default acquisition period of 300 seconds. Therefore, each TIME unit corresponds to approximately 0.000286 seconds (300 ÷ 1,048,576). Multiplying TIME values by this TIMESTEP converts them into meaningful timestamps, enabling proper time-based quality control and analysis.*
+We first start with remove events whose real intensity exceeds the detector’s sensitivity limits using RemoveMargins from the PeacoQC package.
 
 ```{r}
 library('flowCore') 
@@ -330,45 +291,26 @@ library('readxl')
 library('ggcyto')
 library('openCyto')
 library('flowClust')
+library('PeacoQC')
+library('glue')
 ```
 
 ```{r}
 knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
                       message = FALSE, cache.lazy = FALSE)
 
-fcs_dir <- "D:/Internship/data/2. compensated dataset/"
+patient_group <- "mds"  #healthy BM/mds/aml
+fcs_dir <- file.path("D:/Internship/data/2. compensated dataset", patient_group)
 
-#parsing filenames and setting up patient dictionary
-original_ds <- list.files(path=fcs_dir, pattern= '\\.fcs$', full.names=FALSE)
-patient_ids <- as.integer(sub(".*[^0-9](\\d+)\\s+tube.*", "\\1", original_ds))
-patient_file_dict <- split(original_ds, patient_ids)
 
-#select which patients you want to extract: AML, MDS, healthy or fulldataset
-
-aml_patients = c(144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
-
-#mds_patients = c(103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211)
-
-#healthy_patients = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50,51)
-
-#full_dataset = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50,103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
-
-if (exists("aml_patients")) {
-  selected_patients <- aml_patients
-} else if (exists("mds_patients")) {
-  selected_patients <- mds_patients
-} else if (exists("healthy_patients")) {
-  selected_patients <- healthy_patients
-} else if (exists("full_dataset")) {
-  selected_patients <- full_dataset
-} else {
-  stop("No patient group was defined.")
-}
-
-fcs_file_names <- unlist(patient_file_dict[as.character(selected_patients)])
+fcs_file_names <- list.files(path = fcs_dir, pattern = "\\.fcs$", full.names = FALSE)
 fcs_paths <- file.path(fcs_dir, fcs_file_names)
 
-fcs_compensated <- setNames(lapply(fcs_paths, read.FCS, transformation = FALSE), fcs_file_names)
+#named list
+fcs_compensated <- setNames(
+  lapply(fcs_paths, read.FCS, transformation = FALSE),
+  fcs_file_names
+)
 ```
 
 ```{r}
@@ -380,58 +322,76 @@ raw_data_event_counts_df <- data.frame(
   Events = raw_data_event_counts
 )
 
-write.csv(raw_data_event_counts_df, file = "D:/Internship/raw_event_count_aml.csv", row.names = FALSE)
+write.csv(raw_data_event_counts_df, file = glue("D:/Internship/raw_event_count_{patient_group}.csv"), row.names = FALSE)
 ```
 
 ```{r}
-GbLimit <- 2    
-size_fcs <- file.size(fcs_paths) / 1024^3
+#REMOVE MARGIN EVENTS
+channels_of_interest <- c("FS-H", "FS-A", "SS-H", "SS-A", "FITC", "PE", "ECD", "PC5.5","PC7","APC","A700","A750","HLA","KO")
 
-cums <- cumsum(size_fcs)
-groups <- ceiling(sum(size_fcs) / GbLimit)
-
-batches <- cut(cums, breaks = groups, labels = FALSE)
-
-output_dir <- "D:/Internship/data/3. cleaned dataset"
-dir.create(output_dir, showWarnings = FALSE)
+fcs_margins <- lapply(fcs_compensated, function(ff) {
+  present_channels <- intersect(channels_of_interest, colnames(exprs(ff)))
+  
+  PeacoQC::RemoveMargins(ff, present_channels)
+})
 ```
 
-During quality control it was seen that an error occured for some files, this was later seen that it was due to files having event recordings with timestap = 0. These may indicate several things: these events may be from before the acquisition formally started, or instrument reset or failed to stamp time correctly or it might be due to an interrupted run. Because of these facts it was chosen to remove all these files before performing QC.
+Then we perform the actual quality control.
+
+Quality control is essential to account for potential technical issues that may occur during data acquisition. Examples include sudden signal spikes caused by clogs in the system, gradual signal changes at the start of a run due to instrument warm-up, or fluctuations in acquisition speed that introduce persistent signal shifts. These artifacts can affect a large portion of the data and compromise downstream analysis.
+
+Manually identifying and removing these problematic events is not only time-consuming but also introduces subjectivity. To address this, the Peak Extraction and Cleaning Oriented Quality Control (PeacoQC) can be used. PeacoQC offers a robust, automated approach for detecting and removing low-quality events from `.fcs` files. It scales efficiently for large datasets and demonstrates a high median balanced accuracy compared to other automated quality control methods like flowAI, making it a reliable solution for high-throughput quality control in flow cytometry.
+
+It makes use of the density peaks within your data.
+
+![](images/clipboard-930893002.png)
+
+Once these peaks (regions of low quality events) are isolated, PeacoQC applies a two-step filtering strategy to clean the data:
+
+1.  **Isolation Tree**: This method works similarly to a decision tree. It attempts to isolate abnormal bins based on their peak values, effectively identifying regions with aberrant signal patterns. Isolation trees are particularly useful for detecting abrupt shifts or unusual patterns that affect multiple markers simultaneously. A key advantage is their ability to identify and remove non-consecutive regions of low-quality data (such as short clogging events separated by normal data) which many other methods fail to catch.
+2.  **Median Absolute Mediation Distance**: For subtler issues that may not be detected by the isolation tree, PeacoQC uses a second layer of filtering based on Median Absolute Deviation (MAD). This approach smooths the peak values for each marker over time, then calculates how far each bin's smoothed value deviates from the overall median. If a bin deviates beyond a certain threshold (by default, 6 MADs), it is flagged as low quality. This is especially helpful for identifying problems that affect individual markers, such as gradual drifts or isolated channel instability.
+
+PeacoQC then goes on to perform a few important quick checks:
+
+-   It warns you when one of your markers shows consistently increasing or decreasing signal over time. This could indicate problem like contamination. PeacoQC does not remove all the data, it does alert you.
+
+-   It also warns you when it removes more than 70% of your total data. This could be sign of really poor quality sample
+
+*NOTE: TIMESTEP IS NOT PRESENT IN .fcs FILE. In [NAVIOS TETRA MANUAL](chrome-extension://efaidnbmnnnibpcajpcglclefindmkaj/https://4.imimg.com/data4/MJ/IL/MY-4372999/navios-flow-cytometer.pdf), the TIME parameter reflects the timing of each event as unitless integers representing time bins, rather than actual seconds. To convert these values into real-time units, TIMESTEP must be applied as scaling factor.*
+
+*For Navios cytometer, TIME channel spans 1,048,576 bins (2²⁰) over a default acquisition period of 300 seconds. Therefore, each TIME unit corresponds to approximately 0.000286 seconds (300 ÷ 1,048,576). Multiplying TIME values by this TIMESTEP converts them into meaningful timestamps, enabling proper time-based quality control and analysis.*
 
 ```{r}
-for (i in seq_len(groups)) {
-  cat("\nProcessing batch", i, "\n")
-  batch_indices <- which(batches == i)
-
-  for (j in batch_indices) {
-    ff <- fcs_compensated[[j]]
-    file_name <- basename(fcs_paths[j])
-    proceed_flag <- TRUE
-
-    #Running flow_auto_qc
-    cleaned_ff <- tryCatch({
-      flow_auto_qc(ff)
-    }, error = function(e) {
-      cat("Error in flow_auto_qc for", file_name, ":", e$message, "\n")
-      proceed_flag <<- FALSE
-      NULL
-    })
-
-    if (proceed_flag && !is.null(cleaned_ff)) {
-      output_fcs_path <- file.path(output_dir, file_name)
-      write.FCS(cleaned_ff, filename = output_fcs_path)
-      cat("Saved cleaned FCS:", output_fcs_path, "\n")
-    }
+for (i in seq_along(fcs_margins)) {
+  ff_name <- names(fcs_margins)[i]
+  ff_one <- fcs_margins[[i]]
+  
+  #select channels I want to clean
+  present_channels <- colnames(exprs(ff_one))
+  channels_to_use <- intersect(channels_of_interest, present_channels)
+  missing <- setdiff(channels_of_interest, present_channels)
+  if (length(missing) > 0) {
+    warning(paste("In", ff_name, "missing channels:", paste(missing, collapse = ", ")))
   }
-  gc()
+
+  message(paste("Running PeacoQC on:", ff_name, "using channels:", paste(channels_to_use, collapse = ", ")))
+
+  peacoqc_res <- PeacoQC(
+    ff = ff_one,
+    channels = channels_to_use,
+    determine_good_cells = "all",
+    save_fcs = TRUE,
+    plot = TRUE,
+    output_directory = file.path("D:/Internship/data/3. cleaned dataset", patient_group)
+  )
 }
 ```
 
-### usiSTEP 1.4 - TRANSFORMATION
+### STEP 1.4 - TRANSFORMATION
 
 Compensation corrects for spectral overlap between fluorochromes but does not address the underlying distribution of flow cytometry data. Such data typically exhibits a positively skewed distribution, especially in fluorescent channels. To make the data more suitable for analysis and visualization, transformation methods—such as logarithmic, biexponential (logicle), or arcsinh—are applied to achieve a more symmetric, near-normal distribution.
 
-In this workflow, an **arcsinh transformation** is applied to the data, followed by **min–max normalization**, in alignment with the methodology described by Duetz et al. (2021).
+In this workflow, fluorescent channels undergo an arcsinh transformation, while scatter channels are transformed linearly. After these transformations, all channels are normalized using min–max scaling, following the approach described by Duetz et al. (2021).
 
 ```{r}
 library('flowCore') 
@@ -441,46 +401,28 @@ library('readxl')
 library('ggcyto')
 library('openCyto')
 library('flowClust')
+library('PeacoQC')
 ```
 
 ```{r}
 knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
                       message = FALSE, cache.lazy = FALSE)
 
-fcs_dir <- "D:/Internship/data/3. cleaned dataset/"
+patient_group <- "mds"  #healthy BM/mds/aml
+fcs_dir <- file.path("D:/Internship/data/3. cleaned dataset", patient_group)
 
-#parsing filenames and setting up patient dictionary
-original_ds <- list.files(path=fcs_dir, pattern= '\\.fcs$', full.names=FALSE)
-patient_ids <- as.integer(sub(".*[^0-9](\\d+)\\s+tube.*", "\\1", original_ds))
-patient_file_dict <- split(original_ds, patient_ids)
 
-#select which patients you want to extract: AML, MDS, healthy or fulldataset
-
-aml_patients = c(144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
-
-#mds_patients = c(103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211)
-
-#healthy_patients = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50,51)
-
-#full_dataset = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50,103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
-
-if (exists("aml_patients")) {
-  selected_patients <- aml_patients
-} else if (exists("mds_patients")) {
-  selected_patients <- mds_patients
-} else if (exists("healthy_patients")) {
-  selected_patients <- healthy_patients
-} else if (exists("full_dataset")) {
-  selected_patients <- full_dataset
-} else {
-  stop("No patient group was defined.")
-}
-
-fcs_file_names <- unlist(patient_file_dict[as.character(selected_patients)])
+fcs_file_names <- list.files(path = fcs_dir, pattern = "\\.fcs$", full.names = FALSE)
 fcs_paths <- file.path(fcs_dir, fcs_file_names)
 
-fcs_cleaned <- setNames(lapply(fcs_paths, read.FCS, transformation = FALSE), fcs_file_names)
+#named list
+fcs_cleaned <- setNames(
+  lapply(fcs_paths, read.FCS, transformation = FALSE),
+  fcs_file_names
+)
 ```
+
+#### Transformations
 
 ```{r}
 #ARCSINH TRANSFORMATION
@@ -500,11 +442,50 @@ arcsinh_transform <- function(ff, cofactor = 150, exclude_channels = c("FS-A", "
 fcs_transformed <- lapply(fcs_cleaned, arcsinh_transform, cofactor = 150)
 ```
 
+For the linear transformation, a reference marker is needed. We used CD45 marker as the reference.
+
+```{r}
+linear_transform <- function(flow_frame, reference_marker = "KO",
+                                       scatter_channels = c("SS-A", "FS-A", "SS-H", "FS-H")) {
+  expr <- exprs(flow_frame)
+
+  #checking if channels are present
+  missing <- setdiff(c(reference_marker, scatter_channels), colnames(expr))
+  if (length(missing) > 0) {
+    warning(paste("Skipping file: missing channels:", paste(missing, collapse = ", ")))
+    return(flow_frame)
+  }
+
+  #Applying linear transformation
+  for (channel in scatter_channels) {
+    q5_ref  <- quantile(expr[, reference_marker], 0.05, na.rm = TRUE)
+    q95_ref <- quantile(expr[, reference_marker], 0.95, na.rm = TRUE)
+    q5_sc   <- quantile(expr[, channel], 0.05, na.rm = TRUE)
+    q95_sc  <- quantile(expr[, channel], 0.95, na.rm = TRUE)
+
+    a <- (q95_ref - q5_ref) / (q95_sc - q5_sc)
+    b <- q5_ref - a * q5_sc
+
+    lin_trans <- transformList(channel, linearTransform(a = a, b = b))
+    flow_frame <- transform(flow_frame, lin_trans)
+  }
+
+  return(flow_frame)
+}
+
+fcs_transform_lin <- lapply(fcs_transformed, linear_transform)
+
+# Preserve original names
+names(fcs_transform_lin) <- names(fcs_transformed)
+```
+
+#### Min-Max Normalization
+
 For the min-max normalization the 0.001 and 0.999 quantiles are chosen as this is more robust against outliers, avoiding accidental skewing of the data if a few extreme measurements would be included.
 
 ```{r}
 #MIN-MAX NORMALIZATION
-min_max_quantile_normalize <- function(ff, exclude_channels = c("FS-A", "FS-H", "SS-A", "SS-H", "TIME")) {
+min_max_quantile_normalize <- function(ff, exclude_channels = c("TIME", 'Original_ID')) {
   expr <- exprs(ff)
   
   norm_channels <- setdiff(colnames(expr), exclude_channels)
@@ -536,14 +517,14 @@ QC_data_event_counts_df <- data.frame(
   Events = QC_data_event_counts
 )
 
-write.csv(QC_data_event_counts_df, file = "D:/Internship/afterQC_event_count_aml.csv", row.names = FALSE)
+write.csv(QC_data_event_counts_df, file = "D:/Internship/afterQC_event_count_mds.csv", row.names = FALSE)
 ```
 
-### STEP 1.5: SAVING STANDARDIZED AND TRANSFORMED DATA FILES on DRIVE
-
 ```{r}
-output_dir <- normalizePath("D:/Internship/data/4. transformed full dataset", mustWork = FALSE)
-
+output_dir <- normalizePath(
+  file.path("D:/Internship/data/4. transformed dataset", patient_group),
+  mustWork = FALSE
+)
 dir.create(output_dir, showWarnings = FALSE)
 
 for (file_name in names(fcs_norm)) {
@@ -569,39 +550,48 @@ library(dplyr)
 knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
                       message = FALSE, cache.lazy = FALSE)
 
-fcs_dir <- "D:/Internship/data/4. transformed full dataset/"
+patient_group <- "healthy BM"  #healthy BM/mds/aml
+fcs_dir <- file.path("D:/Internship/data/4. transformed dataset", patient_group)
 
-#parsing filenames and setting up patient dictionary
-original_ds <- list.files(path=fcs_dir, pattern= '\\.fcs$', full.names=FALSE)
-patient_ids <- as.integer(sub(".*[^0-9](\\d+)\\s+tube.*", "\\1", original_ds))
-patient_file_dict <- split(original_ds, patient_ids)
 
-#select which patients you want to extract: AML, MDS, healthy or fulldataset
-
-aml_patients = c(144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
-
-#mds_patients = c(103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211)
-
-#healthy_patients = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50,51)
-
-#full_dataset = c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,49,50,103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 186, 187, 188, 189, 192, 195, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 196, 197, 198, 199, 201)
-
-if (exists("aml_patients")) {
-  selected_patients <- aml_patients
-} else if (exists("mds_patients")) {
-  selected_patients <- mds_patients
-} else if (exists("healthy_patients")) {
-  selected_patients <- healthy_patients
-} else if (exists("full_dataset")) {
-  selected_patients <- full_dataset
-} else {
-  stop("No patient group was defined.")
-}
-
-fcs_file_names <- unlist(patient_file_dict[as.character(selected_patients)])
+fcs_file_names <- list.files(path = fcs_dir, pattern = "\\.fcs$", full.names = FALSE)
 fcs_paths <- file.path(fcs_dir, fcs_file_names)
 
-fcs_files <- setNames(lapply(fcs_paths, read.FCS, transformation = FALSE), fcs_file_names)
+#named list
+fcs_transformed <- setNames(
+  lapply(fcs_paths, read.FCS, transformation = FALSE),
+  fcs_file_names
+)
+```
+
+#### Visualization before gating is applied
+
+```{r}
+output_dir <- normalizePath(
+  file.path("D:/Internship/data/5. preprocessed dataset", patient_group, "/before_gating/FSCvsSSC"),
+  mustWork = FALSE
+)
+dir.create(output_dir, showWarnings = FALSE)
+
+for (name in names(fcs_transformed)) {
+  raw_ff <- fcs_transformed[[name]]
+  base_name <- tools::file_path_sans_ext(name)
+  
+  p <- ggcyto(raw_ff, aes(x = `FS-A`, y = `SS-A`)) +
+    geom_hex(bins = 128) +
+    labs(
+      title = paste("FSC-A vs SSC-A - (before gating):", base_name),
+      x = "FSC-A", y = "SSC-A"
+    ) +
+    theme_minimal() +
+    scale_fill_viridis_c(option = "C", direction = -1)
+  
+  ggsave(
+    filename = file.path(output_dir, paste0(base_name, "_FSC-A_vs_SSC-A.png")),
+    plot = p,
+    width = 5, height = 5, dpi = 300
+  )
+}
 ```
 
 ### STEP 2.1 - GATING OUT DEBRIS
@@ -615,24 +605,19 @@ This approach provides a statistically rigorous, unsupervised way to separate ce
 Applying the clustering algorithm directly to the full dataset was found to be overly aggressive and often resulted in the exclusion of a substantial number of valid events. So, the algorithm was applied within this subregion and the cluster identified as representing debris was removed from the full dataset.
 
 ```{r}
-ff_raw <- fcs_files[[2]]
-df_raw <- as.data.frame(exprs(ff_raw))
-```
-
-```{r}
 # Helper function
 round_down_to_1_followed_by_zeros <- function(x) {
   if (x <= 0) return(1)
   10^floor(log10(x))
 }
 
-fcs_gated <- vector("list", length(fcs_files))
+fcs_gated <- vector("list", length(fcs_transformed))
 
 #ACTUAL GATING
-for (i in seq_along(fcs_files)) {
-  cat("Processing sample", i, "of", length(fcs_files), "\n")
+for (i in seq_along(fcs_transformed)) {
+  cat("Processing sample", i, "of", length(fcs_transformed), "\n")
   
-  ff <- fcs_files[[i]]
+  ff <- fcs_transformed[[i]]
   expr <- exprs(ff)[, c("FS-A", "SS-A")]
 
   max_fs <- max(expr[, "FS-A"], na.rm = TRUE)
@@ -643,8 +628,8 @@ for (i in seq_along(fcs_files)) {
   
   #gating out debris
   debris_gate_limits <- list(
-    "FS-A" = c(0, (max_fs_rounded / 8) * 2),
-    "SS-A" = c(0, (max_ss_rounded / 8) * 2)
+    "FS-A" = c(0, (max_fs_rounded / 4)),
+    "SS-A" = c(0, (max_ss_rounded / 4))
   )
   
   ff_rect <- Subset(ff, rectangleGate(filterId = "DebrisRect", .gate = debris_gate_limits))
@@ -660,6 +645,7 @@ for (i in seq_along(fcs_files)) {
       filterId = "flowClustDebris"
     )
   })
+  
   
   ff_clean <- Subset(ff, !debris_gate[[1]])
   
@@ -677,24 +663,18 @@ for (i in seq_along(fcs_files)) {
   
   triangle_gate <- polygonGate(filterId = "TriangleGate", .gate = triangle_coords)
   
-  fcs_gated[[i]] <- Subset(ff_clean, !triangle_gate)
+  ff_clean <- Subset(ff_clean, !triangle_gate)
+
+  # Final strict debris exclusion using rectangle
+  debris_box_gate <- rectangleGate(
+  filterId = "DebrisLowerLeftBox",
+  "FS-A" = c(-Inf, (max_fs_rounded / 8)),
+  "SS-A" = c(-Inf, (max_ss_rounded / 8))
+)
+  ff_clean <- Subset(ff_clean, !debris_box_gate)
+
+  fcs_gated[[i]] <- ff_clean
 }
-```
-
-```{r}
-#VISUALIZING REMOVED EVENTS
-ff_gated <- fcs_gated[[256]]
-ggcyto(ff_gated, aes(x = `FS-A`, y = `SS-A`)) +
-  geom_hex(bins = 128) +
-  labs(title = "FSC-A vs SSC-A (Debris Removed)",
-       x = "FS-A", y = "SS-A") +
-  theme_minimal()
-```
-
-```{r}
-#CHECKING GATED DATA
-ff_gated <- fcs_gated[[2]]
-df_gated <- as.data.frame(exprs(ff_gated))
 ```
 
 ```{r}
@@ -707,12 +687,12 @@ gated_data_event_counts_df <- data.frame(
   Events = gated_data_event_counts
 )
 
-write.csv(gated_data_event_counts_df, file = "D:/Internship/gated_event_count_aml.csv", row.names = FALSE)
+write.csv(gated_data_event_counts_df, file = "D:/Internship/gated_event_count_mds.csv", row.names = FALSE)
 ```
 
 ### STEP 2.2 - REMOVING DOUBLETS
 
-We can use a developed R code section from the Duetz et al. (2021) paper to remove doublets from the data
+We can use a developed R code section from the Duetz et al. (2021) paper to remove doublets from the data. This was manually adapted to filter both 2\*std above and below the expected values.
 
 ```{r}
 is_single <- function(ff, plot = FALSE, ...) {
@@ -754,12 +734,6 @@ fcs_singles <- mapply(function(ff, sel) {
 ```
 
 ```{r}
-#INSPECTING DOUBLET REMOVED DATA
-ff_single <- fcs_singles[[289]]
-autoplot(ff_single, x = "KO", y = "SS-A", bins = 200)
-```
-
-```{r}
 #AFTER DOUBLET REMOVAL DATASET SIZES
 single_data_event_counts <- sapply(fcs_singles, nrow)
 single_data_event_counts_df <- data.frame(
@@ -767,7 +741,37 @@ single_data_event_counts_df <- data.frame(
   Events = single_data_event_counts
 )
 
-write.csv(single_data_event_counts_df, file = "D:/Internship/preprocessed_event_count_aml.csv", row.names = FALSE)
+write.csv(single_data_event_counts_df, file = "D:/Internship/preprocessed_event_count_mds.csv", row.names = FALSE)
+```
+
+#### Visualization after gating is applied
+
+```{r}
+output_dir <- normalizePath(
+  file.path("D:/Internship/data/5. preprocessed dataset", patient_group, "/after_gating/CD45vSSC-A"),
+  mustWork = FALSE
+)
+dir.create(output_dir, showWarnings = FALSE)
+
+for (name in names(fcs_singles)) {
+  raw_ff <- fcs_singles[[name]]
+  base_name <- tools::file_path_sans_ext(name)
+  
+  p <- ggcyto(raw_ff, aes(x = `KO`, y = `SS-A`)) +
+    geom_hex(bins = 128) +
+    labs(
+      title = paste("CD45 vs SSC-A - (after gating):", base_name),
+      x = "CD45", y = "SSC-A"
+    ) +
+    theme_minimal() +
+    scale_fill_viridis_c(option = "C", direction = -1)
+  
+  ggsave(
+    filename = file.path(output_dir, paste0(base_name, "_CD45_vs_SSC-A.png")),
+    plot = p,
+    width = 5, height = 5, dpi = 300
+  )
+}
 ```
 
 ### STEP 2.3 - SAVING PREPROCESSED FILES
@@ -776,12 +780,15 @@ write.csv(single_data_event_counts_df, file = "D:/Internship/preprocessed_event_
 library(flowCore)
 
 #output folder
-out_dir <- "D:/Internship/data/5. preprocessed dataset/aml"
-dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+output_dir <- normalizePath(
+  file.path("D:/Internship/data/5. preprocessed dataset", patient_group),
+  mustWork = FALSE
+)
+dir.create(output_dir, showWarnings = FALSE)
 
 for (name in names(fcs_singles)) {
   ff <- fcs_singles[[name]]
-  filename <- file.path(out_dir, paste0(tools::file_path_sans_ext(name)))
+  filename <- file.path(output_dir, paste0(tools::file_path_sans_ext(name)))
   write.FCS(ff, filename)
   cat("Saved:", filename, "\n")
 }
@@ -811,15 +818,24 @@ library(dplyr)
 ```
 
 ```{r}
-tubes <- paste0("tube ", 1:7)
-fcs_dir <- "D:/Internship/data/5. preprocessed dataset/aml/"
-output_dir <- "D:/Internship/data/6. aggregated files/aml (18 patients)"
+knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
+                      message = FALSE, cache.lazy = FALSE)
+
+patient_group <- "healthy BM"  #healthy BM/mds/aml
+
+fcs_dir <- file.path("D:/Internship/data/5. preprocessed dataset", patient_group)
+output_dir <- normalizePath(
+  file.path("D:/Internship/data/6. aggregated files", patient_group),
+  mustWork = FALSE
+)
 dir.create(output_dir, showWarnings = FALSE)
 
-aggregate_cells <- 720000
+all_fcs_files <- list.files(path = fcs_dir, pattern = "\\.fcs$", full.names = FALSE)
+
 set.seed(2020)
 
-all_fcs_files <- list.files(fcs_dir, pattern = "\\.fcs$", full.names = FALSE)
+aggregate_cells <- 2000000
+tubes <- paste0("tube ", 1:7)
 ```
 
 ```{r}
@@ -851,12 +867,13 @@ for (tube in tubes) {
 
 ```{r}
 #REMOVING COLUMNS THAT WILL NOT BE USED AND RENAME COLUMNS ACCORDINGLY
-ff <- read.FCS("D:/Internship/data/6. aggregated files/mds(25 patients)/tube 1_aggregate.fcs")
+ff <- read.FCS(file.path("D:/Internship/data/6. aggregated files", patient_group, 'tube 7_aggregate.fcs'))
+
 colnames(ff)
 ```
 
 ```{r}
-cols_to_remove <- c("FL7-W")
+cols_to_remove <- c("FL7-W", 'Original_ID', 'File_scattered', 'File', 'Original_ID2')
 ff_clean <- ff[, !(colnames(ff) %in% cols_to_remove)]
 colnames(ff_clean)
 #RENAMING COLUMNS PER TUBE TO WHAT THEY REPRESENT
@@ -864,29 +881,31 @@ colnames(ff_clean)
 
 These are the names of the columns per tube:
 
--   **Tube 1:** c( "FSC-A", "SSC-A", "IgG1-1", "NA1", "IgG1-2", "CD13", "CD117", "CD34", "NA2", "NA3", "HLA-DR", "CD45","TIME","FSC-H", "SSC-H","File", "File_scattered", "Original_ID")
+-   **Tube 1:** c( "FSC-A", "SSC-A", "IgG1-1", "NA1", "IgG1-2", "CD13", "CD117", "CD34", "NA2", "NA3", "HLA-DR", "CD45","TIME","FSC-H", "SSC-H")
 
--   **Tube 2:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "Ki-67", "CD14", "CD64", "CD13", "CD117", "CD34", "CD10", "CD11b", "HLA-DR", "CD45","TIME", "File", "File_scattered", "Original_ID")
+-   **Tube 2:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "Ki-67", "CD14", "CD64", "CD13", "CD117", "CD34", "CD10", "CD11b", "HLA-DR", "CD45","TIME")
 
--   **Tube 3:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "Ki-67", "CD105", "CD123", "CD33", "CD117", "NA1", "CD71", "CD235a", "HLA-DR", "CD45","TIME", "File", "File_scattered", "Original_ID")
+-   **Tube 3:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "Ki-67", "CD105", "CD123", "CD33", "CD117", "NA1", "CD71", "CD235a", "HLA-DR", "CD45","TIME")
 
--   **Tube 4:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A","Ki-67", "NA1","NA2","CD33", "CD117", "CD36", "NA4", "NA5","HLA-DR", "CD45", "TIME", "File", "File_scattered", "Original_ID")
+-   **Tube 4:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A","Ki-67", "NA1","NA2","CD33", "CD117", "CD36", "NA4", "NA5","HLA-DR", "CD45", "TIME")
 
--   **Tube 5:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "CD16", "CD64", "Bcl-2", "CD13", "CD117", "CD34", "CD10", "CD14", "HLA-DR", "CD45","TIME", "File", "File_scattered", "Original_ID")
+-   **Tube 5:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "CD16", "CD64", "Bcl-2", "CD13", "CD117", "CD34", "CD10", "CD14", "HLA-DR", "CD45","TIME")
 
--   **Tube 6:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "NA1", "CD105", "Bcl-2", "CD33", "CD117", "NA2", "CD71", "CD235a", "HLA-DR", "CD45","TIME", "File", "File_scattered", "Original_ID")
+-   **Tube 6:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "NA1", "CD105", "Bcl-2", "CD33", "CD117", "NA2", "CD71", "CD235a", "HLA-DR", "CD45","TIME")
 
--   **Tube 7:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "NA1", "NA2", "Bcl-2", "CD33", "CD117", "CD36", "NA3","NA4", "HLA-DR", "CD45", "TIME", "File", "File_scattered", "Original_ID")
+-   **Tube 7:** c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "NA1", "NA2", "Bcl-2", "CD33", "CD117", "CD36", "NA3","NA4", "HLA-DR", "CD45", "TIME")
 
 NOTE: order of columns can change per tube, check this manually!!!
 
 ```{r}
-colnames(ff_clean) <- c( "FSC-A",  "SSC-A", "IgG1-1", "NA1", "IgG1-2", "CD13", "CD117", "CD34", "NA2", "NA3", "HLA-DR", "CD45","TIME","FSC-H", "SSC-H","File", "File_scattered", "Original_ID")
+colnames(ff_clean) <- c("FSC-H", "FSC-A", "SSC-H", "SSC-A", "NA1", "NA2", "Bcl-2", "CD33", "CD117", "CD36", "NA3","NA4", "HLA-DR", "CD45", "TIME")
 
-write.FCS(ff_clean, filename = "D:/Internship/data/6. aggregated files/mds(25 patients)/tube 1_final.fcs")
+write.FCS(ff_clean, filename = file.path("D:/Internship/data/6. aggregated files", patient_group, 'tube 7_final.fcs'))
 ```
 
-## STEP 4: APPLYING FLOWSOM
+# FLOWSOM
+
+## STEP 1: LOADING IN DATA + LIBRARIES
 
 ```{r}
 library('flowCore') 
@@ -900,73 +919,56 @@ library(dplyr)
 ```
 
 ```{r}
-flow_frame <- read.FCS("D:/Internship/data/results/tube 2_final.fcs")
-colnames(flow_frame)
+patient_group <- 'healthy BM' #healthy BM/mds/aml
+ff <- read.FCS(file.path("D:/Internship/data/6. aggregated files", patient_group, 'tube 2_final.fcs'))
+colnames(ff)
 ```
 
-SSC-A is important for gating, so we will use it as a parameter in the FlowSOM algorithm. However, before we do so, we need to transform this data in order to align with the other channels.
+## STEP 2: RUNNING FLOWSOM
+
+You start of with building a tree based on the lineage markers within your panel. This is done to distinguish cell populations within your dataset.
+
+### STEP 2.1: Cell population Tree
+
+selection of channels:
+
+-   **Tube 1:** c("SSC-A", "IgG1-1", "IgG1-2", "CD13", "CD117", "CD34", "HLA-DR", "CD45")
+
+-   **Tube 2:** c("SSC-A", "CD14", "CD64", "CD13", "CD117", "CD34", "CD10", "CD11b", "HLA-DR", "CD45")
+
+-   **Tube 3:** c("SSC-A", "CD105", "CD123", "CD33", "CD117", "CD71", "CD235a", "HLA-DR", "CD45")
+
+-   **Tube 4:** c("SSC-A","CD33", "CD117", "CD36","HLA-DR", "CD45")
+
+-   **Tube 5:** c("SSC-A", "CD16", "CD64", "Bcl-2", "CD13", "CD117", "CD34", "CD10", "CD14", "HLA-DR", "CD45")
+
+-   **Tube 6:** c("SSC-A", "CD105", "CD33", "CD117", "CD71", "CD235a", "HLA-DR", "CD45")
+
+-   **Tube 7:** c("SSC-A","CD33", "CD117", "CD36", "HLA-DR", "CD45")
 
 ```{r}
-#Define reference marker
-reference_marker <- "CD45"
+dir_results <- file.path("D:/Internship/FlowSOM results", patient_group)
+dir.create(dir_results, showWarnings = FALSE)
 
-expr <- exprs(flow_frame)
-if (!(reference_marker %in% colnames(expr)) || !("SSC-A" %in% colnames(expr))) {
-  stop("Reference marker or SSC-A not found in the flowFrame.")
-}
-
-q5_goal   <- quantile(expr[, reference_marker], 0.05, na.rm = TRUE)
-q95_goal  <- quantile(expr[, reference_marker], 0.95, na.rm = TRUE)
-q5_SSCA   <- quantile(expr[, "SSC-A"], 0.05, na.rm = TRUE)
-q95_SSCA  <- quantile(expr[, "SSC-A"], 0.95, na.rm = TRUE)
-SSCA_a <- (q95_goal - q5_goal) / (q95_SSCA - q5_SSCA)
-SSCA_b <- q5_goal - SSCA_a * q5_SSCA
-
-#linear transformation
-lin_trans <- transformList("SSC-A", linearTransform(a = SSCA_a, b = SSCA_b))
-flow_frame <- transform(flow_frame, lin_trans)
-
-#Min-Max normalization
-min_max_ssca_only <- function(ff) {
-  expr <- exprs(ff)
-  
-  if (!"SSC-A" %in% colnames(expr)) {
-    stop("SSC-A channel not found in the flowFrame.")
-  }
-  
-  # Compute quantiles for normalization
-  q_min <- quantile(expr[, "SSC-A"], 0.001, na.rm = TRUE)
-  q_max <- quantile(expr[, "SSC-A"], 0.999, na.rm = TRUE)
-  
-  # Apply min-max normalization
-  expr[, "SSC-A"] <- (expr[, "SSC-A"] - q_min) / (q_max - q_min)
-  
-  # Cap values between 0 and 1 (optional, but recommended)
-  expr[, "SSC-A"] <- pmin(pmax(expr[, "SSC-A"], 0), 1)
-  
-  # Update and return normalized flowFrame
-  flowCore::exprs(ff) <- expr
-  return(ff)
-}
-
-ff_transformed <- min_max_ssca_only(flow_frame)
-```
-
-```{r}
-dir_results <- "D:/Internship/data/results/"
-SOM_x <- 15 
-SOM_y <- 15 
-n_meta <- 10 
+#parameters are here chosen by https://www.youtube.com/watch?v=hP1aTZ1Iqfcthe 10x10 grid most used for smaller panels. 12x12, 15x15 or 20x20 often chosen for larger panels. for metaclusters, recommendation is to choose 1.5 times the amount of clusters you are expecting. Use the scatterplots to finetune. The algorithms to choose the amount of clustering within flowSOM are not recommended as they strongly underestimate the amount of clusters. 
+SOM_x <- 12 
+SOM_y <- 12 
+n_meta <- 12 
 seed <- 2020 
 scaling <- FALSE
 
-df_flow_frame <- as.data.frame(exprs(ff_transformed))
+#extracting relevant columns
+expr_matrix <- exprs(ff)
+
+#tube 1: 
+selected_exprs <- expr_matrix[, c("SSC-A", "Ki-67", "CD14", "CD64", "CD13", "CD117", "CD34", "CD10", "CD11b", "HLA-DR", "CD45")] #define which columns
+
+ff_selected <- flowFrame(selected_exprs)
 ```
 
 ```{r}
 library(FlowSOM)
-fsom <- FlowSOM(input = ff_transformed, scale = scaling, 
-                colsToUse = c(4:14),
+fsom <- FlowSOM(input = ff_selected, scale = scaling, 
                 seed = seed, 
                 nClus = n_meta, 
                 xdim = SOM_x, 
@@ -976,32 +978,35 @@ fsom <- FlowSOM(input = ff_transformed, scale = scaling,
 Plot the FlowSOM tree structure to visualize the clustering results. The `PlotStars` function generates a star plot, which is a common way to visualize FlowSOM results, showing the clusters and their relationships.
 
 ```{r}
-p <- PlotStars(fsom = fsom, backgroundValues = fsom$metaclustering, maxNodeSize=2.5)
+p <- PlotStars(fsom = fsom, backgroundValues = fsom$metaclustering, maxNodeSize=1.5, equalNodeSize=TRUE)
 ggsave(filename = paste0(dir_results, "fsom_tree_tube2.pdf"), plot = p, height = 8.5, width = 11)
 ```
 
 Create a report summarizing the FlowSOM results, including cluster information and visualizations. The `FlowSOMmary` function generates a comprehensive report that can be saved as a PDF file.
 
 ```{r}
-FlowSOMmary(fsom, plotFile = "D:/Internship/data/results/fsom_tree_tube2_report.pdf")
+FlowSOMmary(fsom, plotFile = paste0(dir_results, "fsom_summary_tube2.pdf"))
 ```
 
 ### Inspecting cells in 2D scatterplots
 
-before we interpret the FlowSOM clutering, we need to make sure clustering was done correctly. There does not exist a single comprehensive metric to assess the quality, however different visualizations and scores can help to verify the FlowSOM results.
+A good way to determine the cluster quality of the chosen parameters, we can look at the scatterplots.
 
 ```{r}
-channel_pairs = list(c("CD34", "CD45"), c("CD45", "SSC-A"), c("CD14", "SSC-A"), c("CD14", "Ki-67"), c("HLA-DR", "CD117"), c("CD-13", "SSC-A")) 
+#SCATTERPLOTS
+channel_pairs = list(c("CD45", "SSC-A")) 
 
-metaclusters_of_interest <- seq_len(n_meta) 
+metaclusters_of_interest <- seq_len(n_meta)
 clusters_of_interest <- NULL
 
-Plot2DScatters(fsom = fsom, channelpairs = channel_pairs, metaclusters = metaclusters_of_interest, clusters = clusters_of_interest, plotFile = paste0(dir_results, "fsom_2D_scatters.png"), centers = FALSE, density=FALSE)
+Plot2DScatters(fsom = fsom, channelpairs = channel_pairs, metaclusters = metaclusters_of_interest, clusters = clusters_of_interest, plotFile = paste0(dir_results, "fsom_2D_scatters_tube2.png"), centers = FALSE, density=FALSE)
 ```
+### STEP 2.2: Expression of functional markers for tree
 
 ```{r}
-Plot2DScatters(fsom = fsom, channelpairs = list(c("CD45", "SSC-A")), metaclusters = metaclusters_of_interest, clusters = clusters_of_interest, plotFile = paste0(dir_results, "fsom_2D_scatters.png"), centers = FALSE, density=FALSE)
+p2 <- PlotMarker(fsom = fsom, marker='Ki-67', colorPalette = grDevices::colorRampPalette(c(
+  "#00007F", "blue", "#007FFF", "cyan", "red", "#7F0000"
+)))
+ggsave(filename = paste0(dir_results, "fsom_tree_tube2_whsjoisjowjswswswswsws.pdf"), plot = p2, height = 8.5, width = 11)
 ```
 
-```         
-```
