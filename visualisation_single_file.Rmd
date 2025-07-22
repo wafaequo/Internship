@@ -48,7 +48,7 @@ ggcyto(before_ff, aes(x = `FS-A`, y = `SS-A`)) +
 ## 3. VISUALISATION SINGLET REMOVAL
 
 ```{r}
-before_ff <- read.FCS("D:/Internship/data/4. transformed full dataset/Femoral head 2 tube 3.fcs.fcs", transformation = FALSE)
+before_ff <- read.FCS("D:/Internship/data/4. transformed dataset/healthy BM/Femoral head 2 tube 3_QC.fcs.fcs", transformation = FALSE)
 
 is_single <- function(ff, plot = FALSE, ...) {
   fsc_a <- flowCore::exprs(ff)[,"FS-A"]
@@ -63,10 +63,11 @@ is_single <- function(ff, plot = FALSE, ...) {
   
   x <- tapply(fsc_a, bins, mean)
   e <- tapply(expected_values, bins, mean)
-  d <- tapply(deviations, bins, function(x){mean(x) + 2*sd(x)})
+  d_lower <- tapply(deviations, bins, function(x){mean(x) + 1*sd(x)})
+  d_upper <- tapply(deviations, bins, function(x){mean(x) + 2*sd(x)})
   
-  lower_y <- e - d
-  upper_y <- e + d
+  lower_y <- e - d_lower
+  upper_y <- e + d_upper
   
   lower_spl <- splinefun(x, lower_y)
   upper_spl <- splinefun(x, upper_y)

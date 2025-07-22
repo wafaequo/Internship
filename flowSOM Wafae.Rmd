@@ -14,6 +14,8 @@ Navigate towards 'Tools \> Install Packages' and download the following packages
 3.  *pheatmap*
 4.  *tidyr*
 5.  *devtools*
+6.  *dplyr*
+7.  *glue*
 
 Then go on to download *BioConductor* in the following way in order to download *FlowCore* correctly.
 
@@ -27,10 +29,13 @@ BiocManager::install("flowCore", force = TRUE)
 BiocManager::install("flowAI")
 BiocManager::install("ggcyto")
 BiocManager::install("openCyto")
+BiocManager::install("flowUtils")
+BiocManager::install("preprocessCore")
 
 #use devtools to download packages from github
 devtools::install_github("saeyslab/PeacoQC", force=TRUE)
 devtools::install_github("saeyslab/FlowSOM")
+devtools::install_github("tchitchek-lab/CytoBackBone")
 ```
 
 # PREPROCESSING
@@ -692,7 +697,7 @@ write.csv(gated_data_event_counts_df, file = "D:/Internship/gated_event_count_md
 
 ### STEP 2.2 - REMOVING DOUBLETS
 
-We can use a developed R code section from the Duetz et al. (2021) paper to remove doublets from the data. This was manually adapted to filter both 2\*std above and below the expected values.
+We can use a developed R code section from the Duetz et al. (2021) paper to remove doublets from the data. This was manually adapted by: 1. adding an upper filter 2. changing the cutoff to 1 sd instead of 2 sd fot he lower limit.
 
 ```{r}
 is_single <- function(ff, plot = FALSE, ...) {
@@ -708,10 +713,11 @@ is_single <- function(ff, plot = FALSE, ...) {
   
   x <- tapply(fsc_a, bins, mean)
   e <- tapply(expected_values, bins, mean)
-  d <- tapply(deviations, bins, function(x){mean(x) + 2*sd(x)})
+  d_lower <- tapply(deviations, bins, function(x){mean(x) + 1*sd(x)})
+  d_upper <- tapply(deviations, bins, function(x){mean(x) + 2*sd(x)})
   
-  lower_y <- e - d
-  upper_y <- e + d
+  lower_y <- e - d_lower
+  upper_y <- e + d_upper
   
   lower_spl <- splinefun(x, lower_y)
   upper_spl <- splinefun(x, upper_y)
@@ -748,7 +754,7 @@ write.csv(single_data_event_counts_df, file = "D:/Internship/preprocessed_event_
 
 ```{r}
 output_dir <- normalizePath(
-  file.path("D:/Internship/data/5. preprocessed dataset", patient_group, "/after_gating/CD45vSSC-A"),
+  file.path("D:/Internship/data/5. preprocessed dataset", patient_group, "/after_gating/CD45vsSSC-A"),
   mustWork = FALSE
 )
 dir.create(output_dir, showWarnings = FALSE)
@@ -774,24 +780,359 @@ for (name in names(fcs_singles)) {
 }
 ```
 
-### STEP 2.3 - SAVING PREPROCESSED FILES
+### STEP 2.3 - CHANGING COLNAMES TO MARKERNAMES
+
+Change column names to markers instead of fluorchrome
+
+NOTE: order of columns can change per tube, check this manually!!!
 
 ```{r}
-library(flowCore)
+knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
+                      message = FALSE, cache.lazy = FALSE)
 
-#output folder
+patient_group <- "healthy BM"  #healthy BM/mds/aml
+fcs_dir <- file.path("D:/Internship/data/5. preprocessed dataset", patient_group)
+
+
+fcs_file_names <- list.files(path = fcs_dir, pattern = "\\.fcs$", full.names = FALSE)
+fcs_paths <- file.path(fcs_dir, fcs_file_names)
+
+#named list
+fcs_final <- setNames(
+  lapply(fcs_paths, read.FCS, transformation = FALSE),
+  fcs_file_names
+)
+```
+
+```{r}
+
+
+```
+
+```{r}
+# Assuming tube_markers list is defined as before
+tube_markers <- list(
+  c("FSC-A", "SSC-A", "IgG1-1", "NA1", "IgG1-2", "CD13", "CD117", "CD34", "NA2", "NA3", "HLA-DR", "CD45", "TIME", "FSC-H"),
+  c("FSC-H", "FSC-A", "SSC-A", "Ki-67", "CD14", "CD64", "CD13", "CD117", "CD34", "CD10", "CD11b", "HLA-DR", "CD45", "TIME"),
+  c("FSC-H", "FSC-A", "SSC-A", "Ki-67", "CD105", "CD123", "CD33", "CD117", "NA1", "CD71", "CD235a", "HLA-DR", "CD45", "TIME"),
+  c("FSC-H", "FSC-A", "SSC-A", "Ki-67", "NA1", "NA2", "CD33", "CD117", "CD36", "NA4", "NA5", "HLA-DR", "CD45", "TIME"),
+  c("FSC-H", "FSC-A", "SSC-A", "CD16", "CD64", "Bcl-2", "CD13", "CD117", "CD34", "CD10", "CD14", "HLA-DR", "CD45", "TIME"),
+  c("FSC-H", "FSC-A", "SSC-A", "NA1", "CD105", "Bcl-2", "CD33", "CD117", "NA2", "CD71", "CD235a", "HLA-DR", "CD45", "TIME"),
+  c("FSC-H", "FSC-A", "SSC-A", "NA1", "NA2", "Bcl-2", "CD33", "CD117", "CD36", "NA3", "NA4", "HLA-DR", "CD45", "TIME")
+)
+
+# Helper function to extract tube number from the name of the FCS object
+getTubeNumber <- function(name) {
+  tube_num <- regmatches(name, regexpr("tube[ _]?\\d+", name, ignore.case = TRUE))
+  if(length(tube_num) == 0) return(NA)
+  as.numeric(gsub(".*?(\\d+)", "\\1", tube_num, ignore.case = TRUE))
+}
+
+cols_to_keep <- c("FS-A", "SS-A", "FITC", "PE", "ECD", "PC5.5", "PC7", "APC", "A700", "A750", "HLA", "KO", "TIME", "FS-H")
+
+# Loop through the named list and rename columns
+# Loop through the named list and rename columns
+for (fcs_name in names(fcs_final)) {
+  tube_num <- getTubeNumber(fcs_name)
+  
+  if (is.na(tube_num) || tube_num < 1 || tube_num > length(tube_markers)) {
+    warning(paste("Tube number not found or invalid in name:", fcs_name))
+    next
+  }
+  
+  fcs_obj <- fcs_final[[fcs_name]]
+  
+  # Keep only desired columns if they exist
+  cols_present <- colnames(fcs_obj@exprs)
+  cols_keep_present <- intersect(cols_present, cols_to_keep)
+  
+  if (length(cols_keep_present) > 0) {
+    # Subset expression matrix
+    exprs_mat <- fcs_obj@exprs[, cols_keep_present, drop = FALSE]
+    
+    # Rebuild flowFrame so metadata matches expression matrix
+    fcs_obj <- flowCore::flowFrame(exprs_mat)
+  } else {
+    warning(paste("No matching columns to keep in", fcs_name))
+    next
+  }
+  
+  # Now check column count matches the markers vector
+  ncols <- ncol(fcs_obj@exprs)
+  nmarkers <- length(tube_markers[[tube_num]])
+  
+  if (ncols != nmarkers) {
+    warning(paste("After cleaning, column number mismatch in", fcs_name, 
+                  "- has", ncols, "columns but", nmarkers, "markers provided"))
+    next
+  }
+  
+  # Assign new column names
+  new_names <- tube_markers[[tube_num]]
+  colnames(fcs_obj@exprs) <- new_names
+  colnames(fcs_obj) <- new_names  # Updates metadata
+
+  fcs_final[[fcs_name]] <- fcs_obj
+  
+  message(paste("Processed and renamed columns for", fcs_name))
+}
+
+```
+
+```{r}
+fcs3 <- fcs_final[[3]]
+colnames(fcs3)
+```
+
+### STEP 2.4 - SAVING PREPROCESSED FILES
+
+```{r}
 output_dir <- normalizePath(
   file.path("D:/Internship/data/5. preprocessed dataset", patient_group),
   mustWork = FALSE
 )
 dir.create(output_dir, showWarnings = FALSE)
 
-for (name in names(fcs_singles)) {
-  ff <- fcs_singles[[name]]
-  filename <- file.path(output_dir, paste0(tools::file_path_sans_ext(name)))
-  write.FCS(ff, filename)
-  cat("Saved:", filename, "\n")
+for (file_name in names(fcs_final)) {
+  file_path <- file.path(output_dir, file_name)
+  write.FCS(fcs_final[[file_name]], filename = file_path)
 }
+```
+
+## STEP 3: IMPUTATION/MERGING OF PANELS
+
+I want to merge the files and the intention was to use CytoBackBone algorithm. However it was not compatible with my version of R and bioconductor and I tried to downgrade. However even by doing to, I ran into alot of issues. So my intention is to code it from scratch
+
+```{r}
+library('flowCore') 
+library('ggplot2')
+library('flowAI')
+library('readxl')
+library('ggcyto')
+library('openCyto')
+library('flowClust')
+library(dplyr)
+library(FNN)
+```
+
+```{r}
+knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
+                      message = FALSE, cache.lazy = FALSE)
+
+patient_group <- "healthy BM"  #healthy BM/mds/aml
+fcs_dir <- file.path("D:/Internship/data/5. preprocessed dataset", patient_group)
+
+
+fcs_file_names <- list.files(path = fcs_dir, pattern = "\\.fcs$", full.names = FALSE)
+fcs_paths <- file.path(fcs_dir, fcs_file_names)
+
+#named list
+fcs_preproc <- setNames(
+  lapply(fcs_paths, read.FCS, transformation = FALSE),
+  fcs_file_names
+)
+
+get_patient_id <- function(fname) {
+  # Extract substring before 'tube' (case insensitive, allow spaces)
+  pat <- regexpr("tube", fname, ignore.case = TRUE)
+  if (pat == -1) {
+    # 'tube' not found, return filename without extension
+    return(tools::file_path_sans_ext(fname))
+  }
+  # Extract substring before 'tube' minus space (pat - 2)
+  patient_id <- substr(fname, 1, pat - 2)
+  trimws(patient_id)  # remove trailing spaces
+}
+
+# Get patient IDs for each loaded FCS (names are filenames)
+patient_ids <- sapply(names(fcs_preproc), get_patient_id)
+
+# Split fcs_preproc list by patient_id
+fcs_by_patient <- split(fcs_preproc, patient_ids)
+
+
+output_dir <- file.path("D:/Internship/data/6. merged dataset", patient_group)
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r}
+CombineFCS <- function (FCS1, RelevantMarkers1, FCS2, RelevantMarkers2, arcsinhTrans = FALSE, manual_shared = c("CD117", "HLA-DR", "CD45")) {
+  library(flowCore)
+  library(FNN)
+
+  # Convert marker names to indices if needed
+  if (is.character(RelevantMarkers1)) {
+    RelevantMarkers1 <- match(RelevantMarkers1, colnames(FCS1@exprs))
+  }
+  if (is.character(RelevantMarkers2)) {
+    RelevantMarkers2 <- match(RelevantMarkers2, colnames(FCS2@exprs))
+  }
+
+  # Subset and convert to data.frames
+  FCS1.data <- as.data.frame(FCS1@exprs[, RelevantMarkers1, drop = FALSE])
+  FCS2.data <- as.data.frame(FCS2@exprs[, RelevantMarkers2, drop = FALSE])
+
+  VarNames1 <- colnames(FCS1.data)
+  VarNames2 <- colnames(FCS2.data)
+
+  if (arcsinhTrans) {
+    FCS1.data <- asinh(FCS1.data / 5)
+    FCS2.data <- asinh(FCS2.data / 5)
+  }
+
+  # Get indices of manually shared markers
+  Shared_Index1 <- match(manual_shared, VarNames1)
+  Shared_Index2 <- match(manual_shared, VarNames2)
+
+  if (any(is.na(Shared_Index1)) || any(is.na(Shared_Index2))) {
+    stop("Not all specified shared markers found in both files.")
+  }
+
+  # Remove unintended shared markers to avoid duplication
+  all_shared <- intersect(VarNames1, VarNames2)
+  unintended_shared <- setdiff(all_shared, manual_shared)
+
+  VarNames1.nonshared <- setdiff(setdiff(VarNames1, manual_shared), unintended_shared)
+  VarNames2.nonshared <- setdiff(setdiff(VarNames2, manual_shared), unintended_shared)
+
+  Data1.nonshared <- FCS1.data[, VarNames1.nonshared, drop = FALSE]
+  Data2.nonshared <- FCS2.data[, VarNames2.nonshared, drop = FALSE]
+
+  # Reorder data: shared markers first
+  FCS1.data <- cbind(FCS1.data[, Shared_Index1, drop = FALSE], Data1.nonshared)
+  FCS2.data <- cbind(FCS2.data[, Shared_Index2, drop = FALSE], Data2.nonshared)
+
+  VarNames1 <- c(manual_shared, VarNames1.nonshared)
+  VarNames2 <- c(manual_shared, VarNames2.nonshared)
+
+  m <- length(manual_shared)
+
+  # Find nearest neighbors
+  IDX1 <- get.knnx(FCS2.data[, 1:m, drop = FALSE], FCS1.data[, 1:m, drop = FALSE], k = 50)$nn.index
+  IDX2 <- get.knnx(FCS1.data[, 1:m, drop = FALSE], FCS2.data[, 1:m, drop = FALSE], k = 50)$nn.index
+
+  # Initialize combined matrices
+  total_cols <- ncol(FCS1.data) + ncol(FCS2.data) - m
+  Data.combine.1 <- matrix(0, nrow = nrow(FCS1.data), ncol = total_cols)
+  Data.combine.2 <- matrix(0, nrow = nrow(FCS2.data), ncol = total_cols)
+
+  for (i in seq_len(nrow(FCS1.data))) {
+    Data.combine.1[i, 1:m] <- as.numeric(FCS1.data[i, 1:m])
+    Data.combine.1[i, (m + 1):(m + ncol(Data1.nonshared))] <- as.numeric(FCS1.data[i, (m + 1):ncol(FCS1.data)])
+    Data.combine.1[i, (m + ncol(Data1.nonshared) + 1):total_cols] <- apply(FCS2.data[IDX1[i, ], (m + 1):ncol(FCS2.data), drop = FALSE], 2, median)
+  }
+
+  for (i in seq_len(nrow(FCS2.data))) {
+    Data.combine.2[i, 1:m] <- as.numeric(FCS2.data[i, 1:m])
+    Data.combine.2[i, (m + 1):(m + ncol(Data1.nonshared))] <- apply(FCS1.data[IDX2[i, ], (m + 1):ncol(FCS1.data), drop = FALSE], 2, median)
+    Data.combine.2[i, (m + ncol(Data1.nonshared) + 1):total_cols] <- as.numeric(FCS2.data[i, (m + 1):ncol(FCS2.data)])
+  }
+
+  Data.combine <- rbind(Data.combine.1, Data.combine.2)
+  VarNames.combine <- c(manual_shared, VarNames1.nonshared, VarNames2.nonshared)
+
+  Data.combine <- as.data.frame(Data.combine)
+  colnames(Data.combine) <- VarNames.combine
+
+  return(Data.combine)
+}
+```
+
+```{r}
+marker_list <- list(
+  c("FSC-A", "SSC-A", "IgG1-1", "IgG1-2", "CD13", "CD117", "CD34", "HLA-DR", "CD45","FSC-H"),  # Tube 1 markers
+  c("FSC-H", "FSC-A", "SSC-A", "Ki-67", "CD14", "CD64", "CD13", "CD117", "CD34", "CD10", "CD11b", "HLA-DR", "CD45"),  # Tube 2 markers
+  c("FSC-H", "FSC-A", "SSC-A", "Ki-67", "CD105", "CD123", "CD33", "CD117", "CD71", "CD235a", "HLA-DR", "CD45"),
+  c("FSC-H", "FSC-A", "SSC-A","Ki-67","CD33", "CD117", "CD36","HLA-DR", "CD45"),
+  c("FSC-H", "FSC-A", "SSC-A", "CD16", "CD64", "Bcl-2", "CD13", "CD117", "CD34", "CD10", "CD14", "HLA-DR", "CD45"),
+  c("FSC-H", "FSC-A", "SSC-A", "CD105", "Bcl-2", "CD33", "CD117", "CD71", "CD235a", "HLA-DR", "CD45"),
+  c("FSC-H", "FSC-A", "SSC-A", "Bcl-2", "CD33", "CD117", "CD36","HLA-DR", "CD45")
+)
+
+fcs <- read.FCS('D:/Internship/data/6. merged dataset/healthy BM/Femoral head 1_merged.fcs')
+
+df<- as.data.frame(fcs@exprs)
+
+fcs2 <- read.FCS('D:/Internship/data/5. preprocessed dataset/healthy BM/Femoral head 1 tube 4_QC.fcs')
+
+merged_data <- CombineFCS(FCS1=fcs, RelevantMarkers1=colnames(fcs), FCS2=fcs2, RelevantMarkers2=marker_list[[4]])
+```
+
+```{r}
+fcs <- read.FCS('D:/Internship/data/6. merged dataset/healthy BM/Femoral head 1_merged.fcs')
+
+df<- as.data.frame(fcs@exprs)
+
+fcs2 <- read.FCS('D:/Internship/data/5. preprocessed dataset/healthy BM/Femoral head 1 tube 4_QC.fcs')
+
+marker1 <- colnames(fcs)
+marker2 <- marker_list[[4]]
+
+selected1 <- marker1
+selected2 <- marker2
+
+shared_markers <- intersect(selected1, selected2)
+nonshared1 <- setdiff(selected1, shared_markers)
+nonshared2 <- setdiff(selected2, shared_markers)
+
+cat("Shared markers:", paste(shared_markers, collapse = ", "), "\n")
+cat("Non-shared in FCS1:", paste(nonshared1, collapse = ", "), "\n")
+cat("Non-shared in FCS2:", paste(nonshared2, collapse = ", "), "\n")
+```
+
+```{r}
+colnames(fcs)
+```
+
+```{r}
+marker_list <- list(
+  c("FSC-A", "SSC-A", "IgG1-1", "IgG1-2", "CD13", "CD117", "CD34", "HLA-DR", "CD45","FSC-H"),  # Tube 1 markers
+  c("FSC-H", "FSC-A", "SSC-A", "Ki-67", "CD14", "CD64", "CD13", "CD117", "CD34", "CD10", "CD11b", "HLA-DR", "CD45"),  # Tube 2 markers
+  c("FSC-H", "FSC-A", "SSC-A", "Ki-67", "CD105", "CD123", "CD33", "CD117", "CD71", "CD235a", "HLA-DR", "CD45"),
+  c("FSC-H", "FSC-A", "SSC-A","Ki-67","CD33", "CD117", "CD36","HLA-DR", "CD45"),
+  c("FSC-H", "FSC-A", "SSC-A", "CD16", "CD64", "Bcl-2", "CD13", "CD117", "CD34", "CD10", "CD14", "HLA-DR", "CD45"),
+  c("FSC-H", "FSC-A", "SSC-A", "CD105", "Bcl-2", "CD33", "CD117", "CD71", "CD235a", "HLA-DR", "CD45"),
+  c("FSC-H", "FSC-A", "SSC-A", "Bcl-2", "CD33", "CD117", "CD36","HLA-DR", "CD45")
+)
+
+
+MultiCombineFCS <- function(file_list, marker_list, arcsinh=FALSE) {
+  fcs1 <- file_list[[1]]
+  fcs2 <- file_list[[2]]
+  combined <- CombineFCS(fcs1, marker_list[[1]], fcs2, marker_list[[2]], arcsinhTrans = arcsinh)
+
+  for (i in 3:length(file_list)) {
+    message(paste("Merging tube", i, "into combined dataset..."))
+    temp_frame <- flowFrame(as.matrix(combined))
+    fcs_next <- file_list[[i]]
+    combined <- CombineFCS(temp_frame, colnames(temp_frame@exprs), fcs_next, marker_list[[i]], arcsinhTrans = arcsinh)
+  }
+
+  return(combined)
+}
+
+for (patient in names(fcs_by_patient)) {
+  cat("Processing patient:", patient, "\n")
+  
+  patient_files <- fcs_by_patient[[patient]]
+  
+  if (length(patient_files) < 2) {
+    warning("Not enough tubes to merge for patient: ", patient)
+    next
+  }
+  
+  selected_files <- patient_files[1:4]
+  selected_markers <- marker_list[1:4]
+  merged_data <- MultiCombineFCS(selected_files, selected_markers, arcsinh=FALSE)
+
+  
+  # Save merged data
+  merged_flowframe <- flowFrame(as.matrix(merged_data))
+  write.FCS(merged_flowframe, filename = file.path(output_dir, paste0(patient, "_merged.fcs")))
+  
+  cat("Saved merged data for patient:", patient, "\n")
+}
+
 ```
 
 ## STEP 3: AGGREGATE FILES
@@ -1001,6 +1342,7 @@ clusters_of_interest <- NULL
 
 Plot2DScatters(fsom = fsom, channelpairs = channel_pairs, metaclusters = metaclusters_of_interest, clusters = clusters_of_interest, plotFile = paste0(dir_results, "fsom_2D_scatters_tube2.png"), centers = FALSE, density=FALSE)
 ```
+
 ### STEP 2.2: Expression of functional markers for tree
 
 ```{r}
@@ -1009,4 +1351,3 @@ p2 <- PlotMarker(fsom = fsom, marker='Ki-67', colorPalette = grDevices::colorRam
 )))
 ggsave(filename = paste0(dir_results, "fsom_tree_tube2_whsjoisjowjswswswswsws.pdf"), plot = p2, height = 8.5, width = 11)
 ```
-
