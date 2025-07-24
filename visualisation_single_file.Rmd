@@ -16,8 +16,9 @@ library('flowClust')
 ```
 
 ```{r}
+
 #SELECT WHICH FILE YOU WANT TO VISUALIZE
-raw_ff <- read.FCS("D:/Internship/data/5. preprocessed dataset/mds/Ki67-104 tube 2.fcs", transformation = FALSE)
+raw_ff <- read.FCS("D:/Internship/data/2. compensated dataset/healthy BM/Femoral head 1 tube 2.fcs", transformation = FALSE)
 ```
 
 ```{r}
