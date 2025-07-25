@@ -53,29 +53,31 @@ library('readxl')
 library('ggcyto')
 library('openCyto')
 library('flowClust')
-library('glue')
+library(glue)
+library(dplyr)
+library(tibble)
 ```
 
 ```{r}
+#LOADING IN .LMD FILES
 knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
                       message = FALSE, cache.lazy = FALSE)
 
-#select patientmap you want to preprocess
-patient_group <- 'aml' #healthy BM/mds/aml
-fcs_dir <- paste0("D:/Internship/data/0. full dataset/", patient_group)
+# Select patient group
+patient_group <- 'healthy BM'
+fcs_dir <- paste0("D:/Internship/data/1. full dataset/", patient_group)
 
 if (!dir.exists(fcs_dir)) stop("Directory does not exist: ", fcs_dir)
 
-#which files are present in the dir
+# Get .LMD files
 fcs_files <- list.files(path = fcs_dir, pattern = "\\.LMD$", full.names = TRUE)
 
-#extracting version 2.0 or 3.0 files
-fcs_data_list <- list()
+# Container for summary info
+fcs_summary <- list()
 
+# Loop through files
 for (file_path in fcs_files) {
-  key <- tools::file_path_sans_ext(basename(file_path))
-  
-  dataset_index <- NULL
+  file_name <- basename(file_path)
   
   for (i in 1:2) {
     tryCatch({
@@ -86,30 +88,44 @@ for (file_path in fcs_files) {
       if (length(version_keys) > 0) {
         fcs_version <- ff_try@description[[version_keys[1]]]
         
-        if (grepl("^3(\\.0)?$", fcs_version)) { #selects version 3.0
-          fcs_data_list[[key]] <- ff_try
-          dataset_index <- i
-          break
+        if (grepl("^(2(\\.\\d+)?|3(\\.0)?)$", fcs_version)) {
+          fcs_summary[[length(fcs_summary) + 1]] <- tibble(
+            file_name = file_name,
+            dataset = i,
+            version = fcs_version,
+            column_names = list(colnames(ff_try))
+          )
         }
+      } else {
+        warning(glue("No version found in {file_name} (dataset {i})"))
       }
     }, error = function(e) {
-      message(glue("Error reading {basename(file_path)} (dataset {i}): {e$message}"))
+      message(glue("Error reading {file_name} (dataset {i}): {e$message}"))
     })
   }
-  
-  if (is.null(dataset_index)) {
-    warning(glue("FCS version 3.0 not found for file: {basename(file_path)}"))
-  }
 }
+
+fcs_summary_df <- bind_rows(fcs_summary)
+
+#saving dataframe with which versions and columns names are present per file
+fcs_summary_export <- fcs_summary_df %>%
+  mutate(column_names = sapply(column_names, function(x) paste(x, collapse = ", ")))
+
+write.csv(fcs_summary_export, "D:/Internship/data/fcs_summary_healthyBM.csv", row.names = FALSE)
+
 ```
 
 ### STEP 1.1: COLUMN NAME STANDARDIZATION
 
 While reading the files, it was observed that column names were not consistent across files. They appeared in two different formats:
 
+This format for all the files:
+
 ```         
 [1] "FS-H"   "FS-A"   "SS-H"   "SS-A"   "FL1-A"  "FL2-A"  "FL3-A"  "FL4-A"  "FL5-A"  "FL6-A"  "FL7-A"  "FL8-A"  "FL9-A"  "FL10-A" "TIME" 
 ```
+
+This format for all the tube 1 files:
 
 ```         
  [1] "FS INT LIN"   "SS INT LIN"   "FL1 INT LOG"  "FL2 INT LOG"  "FL3 INT LOG"  "FL4 INT LOG"  "FL5 INT LOG"  "FL6 INT LOG"  "FL7 INT LOG"  [10] "FL8 INT LOG"  "FL9 INT LOG"  "FL10 INT LOG" "TIME"         "FS PEAK LIN"  "SS PEAK LIN" 
@@ -956,6 +972,10 @@ output_dir <- file.path("D:/Internship/data/6. merged dataset", patient_group)
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 ```
 
+```{r}
+fcs_patients <- fcs_by_patient[48:50]
+```
+
 The FlowSOM algorithm is designed to operate on a single `.fcs` file. In order to retrieve a MST that contains erythropoiesis, myelopoiesis and monopoiesis, imputation across multiple tubes is required. Specifically, tubes 2, 3, and 4 were combined to display a MST for Ki-67 expression, while tubes 5, 6, and 7 were used to build a MST for Bcl-2 expression analysis.
 
 In previous work, Mestrum et al. (2023) utilized the Infinicyt software for tube merging. Infinicyt applies k-nearest neighbors (kNN) imputation using a single neighbor (k = 1). However, evaluations of merging and imputation quality in flow cytometry data revealed significant limitations in this approach according to Mocking et al. (2023). It was seen that R packages such as CyTOFmerge and CytoBackBone outperformed Infinicyt.
@@ -965,74 +985,129 @@ In this code the `CombineFCS` function of the `CyTOFmerge` package is used to se
 *Note: This imputation step is computationally intensive. While the use of the MatrixStats package has improved performance, the process remains time-consuming—merging three tubes per patient currently takes approximately 12 minutes.*
 
 ```{r}
-#CYTOFMERGE FUNCTION FOR MERGING 
 
-CombineFCS <- function(FCS1, RelevantMarkers1, FCS2, RelevantMarkers2) {
-  
-  #Selecting data and formatting for kNN
+```
+
+```{r}
+CombineFCS <- function(FCS1, RelevantMarkers1, FCS2, RelevantMarkers2, backbone_markers) {
+
   if (is.character(RelevantMarkers1)) {
     RelevantMarkers1 <- match(RelevantMarkers1, colnames(FCS1@exprs))
   }
   if (is.character(RelevantMarkers2)) {
     RelevantMarkers2 <- match(RelevantMarkers2, colnames(FCS2@exprs))
   }
-  
+
   FCS1.data <- as.data.frame(FCS1@exprs[, RelevantMarkers1, drop = FALSE])
   FCS2.data <- as.data.frame(FCS2@exprs[, RelevantMarkers2, drop = FALSE])
   VarNames1 <- colnames(FCS1.data)
   VarNames2 <- colnames(FCS2.data)
-  
+
+  #Identify shared and non-shared markers
   shared_markers <- intersect(VarNames1, VarNames2)
-  
-  if (length(shared_markers) == 0) {
-    stop("No shared markers found between the two tubes.")
+  overlapping_non_backbone <- setdiff(shared_markers, backbone_markers)
+
+  #Ensure backbone markers are present
+  backbone <- intersect(backbone_markers, shared_markers)
+  if (length(backbone) == 0) {
+    stop("No shared backbone markers found in both FCS files.")
   }
-  
-  VarNames1.nonshared <- setdiff(VarNames1, shared_markers)
-  VarNames2.nonshared <- setdiff(VarNames2, shared_markers)
 
-  Data1.nonshared <- FCS1.data[, VarNames1.nonshared, drop = FALSE]
-  Data2.nonshared <- FCS2.data[, VarNames2.nonshared, drop = FALSE]
+  #Backbone-based data for kNN
+  FCS1.match <- FCS1.data[, backbone, drop = FALSE]
+  FCS2.match <- FCS2.data[, backbone, drop = FALSE]
 
-  FCS1.data <- cbind(FCS1.data[, shared_markers, drop = FALSE], Data1.nonshared)
-  FCS2.data <- cbind(FCS2.data[, shared_markers, drop = FALSE], Data2.nonshared)
+  #Non-overlapping markers
+  FCS1.nonshared <- setdiff(VarNames1, shared_markers)
+  FCS2.nonshared <- setdiff(VarNames2, shared_markers)
 
-  #starting kNN calculations
-  m <- length(shared_markers)
+  #Special case: FCS2 has no new markers (no imputation into FCS1)
+  if (length(FCS2.nonshared) == 0) {
+    ImputeFromFCS1 <- NULL
 
-  IDX1 <- get.knnx(FCS2.data[, 1:m, drop = FALSE], FCS1.data[, 1:m, drop = FALSE], k = 50)$nn.index
-  IDX2 <- get.knnx(FCS1.data[, 1:m, drop = FALSE], FCS2.data[, 1:m, drop = FALSE], k = 50)$nn.index
+    # Only need to impute into FCS2 if FCS1 has extra markers
+    if (length(FCS1.nonshared) > 0) {
+      IDX2 <- get.knnx(FCS1.match, FCS2.match, k = 50)$nn.index
+      ImputeFromFCS1 <- sapply(FCS1.nonshared, function(marker) {
+        values <- FCS1.data[, marker]
+        rowMedians(matrix(values[IDX2], nrow = nrow(IDX2)))
+      })
+      if (is.vector(ImputeFromFCS1)) {
+        ImputeFromFCS1 <- matrix(ImputeFromFCS1, ncol = 1)
+        colnames(ImputeFromFCS1) <- FCS1.nonshared
+      }
+    } else {
+      ImputeFromFCS1 <- matrix(nrow = nrow(FCS2.match), ncol = 0)
+    }
 
-  FCS1.nonshared <- as.matrix(FCS1.data[, (m + 1):ncol(FCS1.data), drop = FALSE])
-  FCS2.nonshared <- as.matrix(FCS2.data[, (m + 1):ncol(FCS2.data), drop = FALSE])
+    #Combine
+    Data.combine.1 <- cbind(
+      FCS1.match,
+      if (length(FCS1.nonshared) > 0) FCS1.data[, FCS1.nonshared, drop = FALSE],
+      if (length(overlapping_non_backbone) > 0) FCS1.data[, overlapping_non_backbone, drop = FALSE]
+    )
 
-  imputed_from_FCS2 <- sapply(seq_len(ncol(FCS2.nonshared)), function(j) {
-    rowMedians(matrix(FCS2.nonshared[IDX1, j], nrow = nrow(IDX1)))
-  })
+    Data.combine.2 <- cbind(
+      FCS2.match,
+      if (ncol(ImputeFromFCS1) > 0) ImputeFromFCS1,
+      if (length(overlapping_non_backbone) > 0) FCS2.data[, overlapping_non_backbone, drop = FALSE]
+    )
 
-  imputed_from_FCS1 <- sapply(seq_len(ncol(FCS1.nonshared)), function(j) {
-    rowMedians(matrix(FCS1.nonshared[IDX2, j], nrow = nrow(IDX2)))
-  })
+    colnames(Data.combine.2) <- colnames(Data.combine.1)
+    return(as.data.frame(rbind(Data.combine.1, Data.combine.2)))
+  }
 
-  #Assemble data for output
+  #General case: imputation in both directions
+  IDX1 <- get.knnx(FCS2.match, FCS1.match, k = 50)$nn.index
+  IDX2 <- get.knnx(FCS1.match, FCS2.match, k = 50)$nn.index
+
+  ImputeFromFCS2 <- NULL
+  if (length(FCS2.nonshared) > 0) {
+    ImputeFromFCS2 <- sapply(FCS2.nonshared, function(marker) {
+      values <- FCS2.data[, marker]
+      rowMedians(matrix(values[IDX1], nrow = nrow(IDX1)))
+    })
+    if (is.vector(ImputeFromFCS2)) {
+      ImputeFromFCS2 <- matrix(ImputeFromFCS2, ncol = 1)
+      colnames(ImputeFromFCS2) <- FCS2.nonshared
+    }
+  }
+
+  ImputeFromFCS1 <- NULL
+  if (length(FCS1.nonshared) > 0) {
+    ImputeFromFCS1 <- sapply(FCS1.nonshared, function(marker) {
+      values <- FCS1.data[, marker]
+      rowMedians(matrix(values[IDX2], nrow = nrow(IDX2)))
+    })
+    if (is.vector(ImputeFromFCS1)) {
+      ImputeFromFCS1 <- matrix(ImputeFromFCS1, ncol = 1)
+      colnames(ImputeFromFCS1) <- FCS1.nonshared
+    }
+  }
+
+  if (is.null(ImputeFromFCS2)) {
+    ImputeFromFCS2 <- matrix(nrow = nrow(FCS1.match), ncol = 0)
+  }
+  if (is.null(ImputeFromFCS1)) {
+    ImputeFromFCS1 <- matrix(nrow = nrow(FCS2.match), ncol = 0)
+  }
+
   Data.combine.1 <- cbind(
-    FCS1.data[, 1:m, drop = FALSE],
-    FCS1.nonshared,
-    imputed_from_FCS2
+    FCS1.match,
+    if (length(FCS1.nonshared) > 0) FCS1.data[, FCS1.nonshared, drop = FALSE],
+    if (ncol(ImputeFromFCS2) > 0) ImputeFromFCS2,
+    if (length(overlapping_non_backbone) > 0) FCS1.data[, overlapping_non_backbone, drop = FALSE]
   )
 
   Data.combine.2 <- cbind(
-    FCS2.data[, 1:m, drop = FALSE],
-    imputed_from_FCS1,
-    FCS2.nonshared
+    FCS2.match,
+    if (ncol(ImputeFromFCS1) > 0) ImputeFromFCS1,
+    if (length(FCS2.nonshared) > 0) FCS2.data[, FCS2.nonshared, drop = FALSE],
+    if (length(overlapping_non_backbone) > 0) FCS2.data[, overlapping_non_backbone, drop = FALSE]
   )
 
-  VarNames.combine <- c(shared_markers, VarNames1.nonshared, VarNames2.nonshared)
-  colnames(Data.combine.1) <- VarNames.combine
-  colnames(Data.combine.2) <- VarNames.combine
-
+  colnames(Data.combine.2) <- colnames(Data.combine.1)
   Data.combine <- rbind(Data.combine.1, Data.combine.2)
-  colnames(Data.combine) <- VarNames.combine
 
   return(as.data.frame(Data.combine))
 }
@@ -1053,43 +1128,66 @@ marker_list <- list(
 ) 
 
 
-MultiCombineFCS <- function(file_list, marker_list) {
+MultiCombineFCS <- function(file_list, marker_list, backbone_markers) {
   fcs1 <- file_list[[1]]
   fcs2 <- file_list[[2]]
-  combined <- CombineFCS(fcs1, marker_list[[1]], fcs2, marker_list[[2]], arcsinhTrans = arcsinh)
+  combined <- CombineFCS(fcs1, marker_list[[1]], fcs2, marker_list[[2]], backbone_markers)
 
-  for (i in 3:length(file_list)) {
-    message(paste("Merging tube", i, "into combined dataset..."))
-    temp_frame <- flowFrame(as.matrix(combined))
-    fcs_next <- file_list[[i]]
-    combined <- CombineFCS(temp_frame, colnames(temp_frame@exprs), fcs_next, marker_list[[i]], arcsinhTrans = arcsinh)
+  if (length(file_list) > 2) {
+    for (i in 3:length(file_list)) {
+      message(paste("Merging tube", i, "into combined dataset..."))
+
+      # Convert combined matrix back to flowFrame
+      temp_frame <- flowCore::flowFrame(as.matrix(combined))
+
+      fcs_next <- file_list[[i]]
+      next_markers <- marker_list[[i]]
+
+      combined <- CombineFCS(temp_frame, colnames(temp_frame@exprs), fcs_next, next_markers, backbone_markers)
+    }
   }
 
   return(combined)
 }
 
-#forloop to combine tubes
-for (patient in names(fcs_by_patient)) {
+
+backbone_markers <- c("CD45", "HLA-DR", "CD117")  # Define once for reuse
+
+for (patient in names(fcs_patients)) {
   cat("Processing patient:", patient, "\n")
   
-  patient_files <- fcs_by_patient[[patient]]
+  patient_files <- fcs_patients[[patient]]
   
   if (length(patient_files) < 2) {
     warning("Not enough tubes to merge for patient: ", patient)
     next
   }
-  
-  selected_files <- patient_files[c(2:4)] #select here which tubes to merge
-  selected_markers <- marker_list[c(2:4)] #select here which tubes to merge
-  merged_data <- MultiCombineFCS(selected_files, selected_markers)
 
-  
-  #Saving data
-  merged_flowframe <- flowFrame(as.matrix(merged_data))
-  write.FCS(merged_flowframe, filename = file.path(output_dir, paste0(patient, "_merged.fcs")))
-  
+  # Select tubes to merge (change indices as needed)
+  selected_files <- patient_files[c(2:7)]
+
+  # If marker_list is per-patient:
+  # selected_markers <- marker_list[[patient]][c(2:7)]
+  # If marker_list is global:
+  selected_markers <- marker_list[c(2:7)]
+
+  # Merge
+  merged_data <- MultiCombineFCS(selected_files, selected_markers, backbone_markers)
+
+  # Optional: add patient ID or origin label if needed
+  # merged_data$Patient <- patient
+
+  # Save to FCS
+  merged_flowframe <- flowCore::flowFrame(as.matrix(merged_data))
+  output_path <- file.path(output_dir, paste0(patient, "_merged.fcs"))
+  flowCore::write.FCS(merged_flowframe, filename = output_path)
+
   cat("Saved merged data for patient:", patient, "\n")
 }
+```
+
+```{r}
+
 ```
 
 ## STEP 4: AGGREGATE FILES
@@ -1133,7 +1231,7 @@ fcs_paths <- file.path(fcs_dir, all_fcs_files)
 
 #set parameters
 set.seed(2020)
-aggregate_cells <- 2000000
+aggregate_cells <- 1960000
 ```
 
 ```{r}
@@ -1142,11 +1240,16 @@ agg <- FlowSOM::AggregateFlowFrames(
   fileNames = fcs_paths,
   cTotal = aggregate_cells,
   writeOutput = TRUE,
-  outputFile = file.path(output_dir, "all_tubes_aggregated_ki67.fcs")
+  outputFile = file.path(output_dir, "all_tubes_aggregated_everything.fcs")
 )
 ```
 
 # FLOWSOM
+
+```{r}
+ff_patient <- read.FCS("D:/Internship/data/6. merged dataset/healthy BM/Femoral head 1_merged.fcs")
+expr_ff <- exprs(ff_patient)
+```
 
 ## STEP 1: LOADING IN DATA + LIBRARIES
 
@@ -1162,8 +1265,12 @@ library(dplyr)
 ```
 
 ```{r}
+
 patient_group <- 'healthy BM' #healthy BM/mds/aml
-ff <- read.FCS("D:/Internship/data/7. aggregated files/healthy BM/all_tubes_aggregated_ki67.fcs")
+dir_results <- file.path("D:/Internship/FlowSOM results", patient_group)
+dir.create(dir_results, showWarnings = FALSE)
+
+ff <- read.FCS("D:/Internship/data/7. aggregated files/healthy BM/all_tubes_aggregated_everything.fcs")
 colnames(ff)
 ```
 
@@ -1174,19 +1281,17 @@ You start of with building a tree based on the lineage markers within your panel
 ### STEP 2.1.a: TRAINING Cell population Tree
 
 ```{r}
-dir_results <- file.path("D:/Internship/FlowSOM results", patient_group)
-dir.create(dir_results, showWarnings = FALSE)
 
 #parameters are here chosen by https://www.youtube.com/watch?v=hP1aTZ1Iqfcthe 10x10 grid most used for smaller panels. 12x12, 15x15 or 20x20 often chosen for larger panels. for metaclusters, recommendation is to choose 1.5 times the amount of clusters you are expecting. Use the scatterplots to finetune. The algorithms to choose the amount of clustering within flowSOM are not recommended as they strongly underestimate the amount of clusters. 
-SOM_x <- 12 
-SOM_y <- 12 
-n_meta <- 15 
+SOM_x <- 15 
+SOM_y <- 15 
+n_meta <- 20 
 seed <- 2020 
 scaling <- FALSE
 
 expr_matrix <- exprs(ff)
 
-excluded_markers <- c("File", "File_scattered", "Original_ID", "FSC-A", "FSC-H")
+excluded_markers <- c("File", "File_scattered", "Original_ID", "FSC-H")
 selected_markers <- setdiff(colnames(expr_matrix), excluded_markers)
 selected_exprs <- expr_matrix[, selected_markers]
 ff_selected <- flowFrame(selected_exprs)
@@ -1199,27 +1304,40 @@ fsom <- FlowSOM(input = ff_selected, scale = scaling,
                 nClus = n_meta, 
                 xdim = SOM_x, 
                 ydim = SOM_y)
+```
 
-saveRDS(fsom, file = file.path(dir_results, "fsom_ki67_without.rds"))
+```{r}
+saveRDS(fsom, file = file.path(dir_results, "fsom_15X15meta20_healthyBM.rds"))
 ```
 
 Plot the FlowSOM tree structure to visualize the clustering results. The `PlotStars` function generates a star plot, which is a common way to visualize FlowSOM results, showing the clusters and their relationships.
 
 ```{r}
 p <- PlotStars(fsom = fsom, backgroundValues = fsom$metaclustering, maxNodeSize=1.5, equalNodeSize=TRUE)
-ggsave(filename = paste0(dir_results, "fsom_tree_ki67_withoutt.pdf"), plot = p, height = 8.5, width = 11)
+ggsave(filename = paste0(dir_results, "fsom_tree_20x20meta15_healthyBM.pdf"), plot = p, height = 8.5, width = 11)
 ```
 
 Create a report summarizing the FlowSOM results, including cluster information and visualizations. The `FlowSOMmary` function generates a comprehensive report that can be saved as a PDF file.
 
 ```{r}
-FlowSOMmary(fsom, plotFile = paste0(dir_results, "fsom_summary_ki67_without.pdf"))
+FlowSOMmary(fsom, plotFile = paste0(dir_results, "fsom_summary_20x20meta15_healthyBM.pdf"))
 ```
 
 ### STEP 2.1.b: Extracting established fSOM from .RDS file
 
 ```{r}
-fsom <- readRDS("...")
+library('flowCore') 
+library('ggplot2')
+library('flowAI')
+library('readxl')
+library('ggcyto')
+library('openCyto')
+library('flowClust')
+library(dplyr)
+```
+
+```{r}
+fsom <- readRDS("D:/Internship/FlowSOM results/healthy BM/everything/(15x15) 20 meta/fsom_15X15meta20_healthyBM.rds")
 ```
 
 ## STEP 3: Inspecting cells in 2D scatterplots
@@ -1227,13 +1345,17 @@ fsom <- readRDS("...")
 A good way to determine the cluster quality of the chosen parameters, we can look at the scatterplots.
 
 ```{r}
-#SCATTERPLOTS
-channel_pairs = list(c("CD45", "SSC-A"), c("CD13", "SSC-A"), c("HLA-DR", "CD117")) 
 
-metaclusters_of_interest <- seq_len(n_meta)
+```
+
+```{r}
+#SCATTERPLOTS
+channel_pairs = list(c("CD45", "SSC-A"), c("CD13", "SSC-A")) 
+
+metaclusters_of_interest <- c(4,7) #seq_len(n_meta)
 clusters_of_interest <- NULL
 
-Plot2DScatters(fsom = fsom, channelpairs = channel_pairs, metaclusters = metaclusters_of_interest, clusters = clusters_of_interest, plotFile = paste0(dir_results, "fsom_2D_scatters_inspect.png"), centers = FALSE, density=FALSE)
+Plot2DScatters(fsom = fsom, channelpairs = channel_pairs, metaclusters = metaclusters_of_interest, clusters = clusters_of_interest, plotFile = paste0(dir_results, "fsom_2D_lymph_scatterplot_metaclusters.png"), centers = FALSE, density=FALSE)
 ```
 
 ## STEP 4: Expression functional markers
@@ -1241,8 +1363,8 @@ Plot2DScatters(fsom = fsom, channelpairs = channel_pairs, metaclusters = metaclu
 Once the clustering is deemed of quality, we can express the amount of Ki-67/Bcl-2 expression of the metaclusters. This will give us information about the pattern of expression.
 
 ```{r}
-p2 <- PlotMarker(fsom = fsom, marker='Ki-67', colorPalette = grDevices::colorRampPalette(c(
-  "#00007F", "blue", "#007FFF", "cyan", "red", "#7F0000"
-)))
-ggsave(filename = paste0(dir_results, "fsom_tree_tube2_whsjoisjowjswswswswsws.pdf"), plot = p2, height = 8.5, width = 11)
+
+p2 <- PlotMarker(fsom = fsom, marker = 'Ki-67', maxNodeSize=1, equalNodeSize=TRUE)
+
+ggsave(filename = paste0(dir_results, "fsom_tree_Ki-67_expression.pdf"), plot = p2, height = 8.5, width = 11)
 ```
