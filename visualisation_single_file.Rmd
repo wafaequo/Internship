@@ -18,16 +18,42 @@ library('flowClust')
 ```{r}
 
 #SELECT WHICH FILE YOU WANT TO VISUALIZE
-raw_ff <- read.FCS("D:/Internship/data/2. compensated dataset/healthy BM/Femoral head 1 tube 2.fcs", transformation = FALSE)
+#raw_ff <- read.FCS("D:/Internship/data/2. compensated dataset/healthy BM/Femoral head 1 tube 2.fcs", transformation = FALSE)
+
+patient_group <- 'healthy BM' #healthy BM/mds/aml
+dir_results <- file.path("D:/Internship/FlowSOM results", patient_group)
+dir.create(dir_results, showWarnings = FALSE)
+
+
+# Path to merged dataset file
+fcs_path <- file.path("D:/Internship/data/7. aggregated files", patient_group, "all_tubes_aggregated_everything.fcs")
+
+# Read FCS file
+ff <- flowCore::read.FCS(fcs_path, transformation = FALSE)
+
+colnames(ff)
 ```
 
 ```{r}
 #VISUALISATION
-ggcyto(raw_ff, aes(x = `KO`, y = `SS-A`)) +
-  geom_hex(bins = 128) +
-  labs(title = "FSC-A vs SSC-A (preprocessed)",
-       x = "CD45", y = "SS-A") +
-  theme_minimal()
+# Suppose your counts range from 0 to 5000 across all plots
+fixed_limits <- c(0, 70)
+
+ggcyto(ff, aes(x = `CD45`, y = `SSC-A`)) +
+  geom_hex(bins = 128) +  # keep default colors, just fix limits
+  labs(title = "Healthy BM: CD45 vs SSC-A",
+       x = "CD45 Expression", y = "Side Scatter (SSC-A)") +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    axis.title = element_text(face = "bold"),
+    panel.grid.major = element_line(color = "grey90"),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+```         
 ```
 
 ## 2. VISUALISING DEBRIS REMOVAL STEP

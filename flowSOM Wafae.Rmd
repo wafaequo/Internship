@@ -5,7 +5,7 @@ output: html_notebook
 
 NOTE: *R version 4.5.0*. Also make sure [Rtools45](https://cran.r-project.org/bin/windows/Rtools/rtools45/rtools.html) is downloaded.
 
-## STEP 0.1: DOWNLOADING PACKAGES (SKIP IF ALREADY DOWNLOADED)
+## STEP 0.1: DOWNLOAD PACKAGES (SKIP IF ALREADY DONE)
 
 Navigate towards 'Tools \> Install Packages' and download the following packages:
 
@@ -18,6 +18,7 @@ Navigate towards 'Tools \> Install Packages' and download the following packages
 7.  *glue*
 8.  *FNN*
 9.  *matrixStats*
+10. *tibble*
 
 Then go on to download *BioConductor* in the following way in order to download *FlowCore* correctly.
 
@@ -25,8 +26,9 @@ Then go on to download *BioConductor* in the following way in order to download 
 if (!require("BiocManager", quietly = TRUE))
     install.packages("BiocManager")
 
-#The following initializes usage of Bioc devel and downloads packages via BioConductor
+#Initialize Bioc devel to download packages.
 BiocManager::install(version='devel')
+
 BiocManager::install("flowCore", force = TRUE)
 BiocManager::install("flowAI")
 BiocManager::install("ggcyto")
@@ -39,11 +41,13 @@ devtools::install_github("saeyslab/FlowSOM")
 
 # PREPROCESSING
 
-*NOTE: preprocessing full dataset can be heavy for CPU, better to preprocess in batches. + good to save .fcs files after each step as Rstudio may sometimes crash.*
+*Note: Preprocessing the full dataset can be CPU-intensive. It's better to process in batches and save `.fcs` files after each step to avoid data loss in case RStudio crashes.*
 
-## STEP 1: STANDARDIZATION + TRANSFORMATION STEPS.
+## STEP 1: STANDARDIZATION + COMPENSATION
 
 The code below selects the patient files based on their patient_id from the .LMD files. The .LMD files contain two versions of .fcs files: Version 3.0 or Version 2.0. In this pipeline version 3.0 is selected as these contain the spillover matrices for compensation.
+
+-   *fcs_summary.csv* is made in order to check if all the version 3 files have linear scale or LOG scale. This pipeline only works on linearly scaled data.
 
 ```{r}
 library('flowCore') 
@@ -64,20 +68,21 @@ knitr::opts_chunk$set(cache = TRUE, warning = FALSE,
                       message = FALSE, cache.lazy = FALSE)
 
 # Select patient group
-patient_group <- 'healthy BM'
+patient_group <- 'aml'
 fcs_dir <- paste0("D:/Internship/data/1. full dataset/", patient_group)
 
 if (!dir.exists(fcs_dir)) stop("Directory does not exist: ", fcs_dir)
 
-# Get .LMD files
 fcs_files <- list.files(path = fcs_dir, pattern = "\\.LMD$", full.names = TRUE)
 
-# Container for summary info
+fcs_data_list <- list()
 fcs_summary <- list()
 
-# Loop through files
+#extracting data
 for (file_path in fcs_files) {
   file_name <- basename(file_path)
+  
+  version3_loaded <- FALSE
   
   for (i in 1:2) {
     tryCatch({
@@ -88,34 +93,40 @@ for (file_path in fcs_files) {
       if (length(version_keys) > 0) {
         fcs_version <- ff_try@description[[version_keys[1]]]
         
-        if (grepl("^(2(\\.\\d+)?|3(\\.0)?)$", fcs_version)) {
-          fcs_summary[[length(fcs_summary) + 1]] <- tibble(
-            file_name = file_name,
-            dataset = i,
-            version = fcs_version,
-            column_names = list(colnames(ff_try))
-          )
+        if (grepl("^3(\\.0)?$", fcs_version)) { #selecting version 3
+          # Save version 3 dataset
+          fcs_data_list[[file_name]] <- ff_try
+          version3_loaded <- TRUE
         }
+        
+        # For summary table
+        fcs_summary[[length(fcs_summary) + 1]] <- tibble(
+          file_name = file_name,
+          dataset = i,
+          version = fcs_version,
+          column_names = list(colnames(ff_try))
+        )
       } else {
         warning(glue("No version found in {file_name} (dataset {i})"))
       }
+      
+      if (version3_loaded) break  # Exit loop if version 3 is found and saved
+      
     }, error = function(e) {
       message(glue("Error reading {file_name} (dataset {i}): {e$message}"))
     })
   }
 }
 
-fcs_summary_df <- bind_rows(fcs_summary)
-
-#saving dataframe with which versions and columns names are present per file
-fcs_summary_export <- fcs_summary_df %>%
+# Export summary
+fcs_summary_df <- bind_rows(fcs_summary) %>%
   mutate(column_names = sapply(column_names, function(x) paste(x, collapse = ", ")))
 
-write.csv(fcs_summary_export, "D:/Internship/data/fcs_summary_healthyBM.csv", row.names = FALSE)
-
+#change filename to what you want
+write.csv(fcs_summary_df, "D:/Internship/data/fcs_summary_aml.csv", row.names = FALSE)
 ```
 
-### STEP 1.1: COLUMN NAME STANDARDIZATION
+### STEP 1.1: COLUMNNAME STANDARDIZATION
 
 While reading the files, it was observed that column names were not consistent across files. They appeared in two different formats:
 
@@ -131,7 +142,8 @@ This format for all the tube 1 files:
  [1] "FS INT LIN"   "SS INT LIN"   "FL1 INT LOG"  "FL2 INT LOG"  "FL3 INT LOG"  "FL4 INT LOG"  "FL5 INT LOG"  "FL6 INT LOG"  "FL7 INT LOG"  [10] "FL8 INT LOG"  "FL9 INT LOG"  "FL10 INT LOG" "TIME"         "FS PEAK LIN"  "SS PEAK LIN" 
 ```
 
-The column names have been standardized to a consistent format to ensure reliable access during bulk preprocessing.
+This shows that some files are in log scale while others are linear; this must be standardized first.\
+Column names have been unified for consistent access and to exclude unnecessary ones during preprocessing.
 
 ```{r}
 #CHECKING COLUMN NAMES BEFORE NAME STANDARDIZATION
@@ -569,7 +581,7 @@ library(dplyr)
 knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
                       message = FALSE, cache.lazy = FALSE)
 
-patient_group <- "healthy BM"  #healthy BM/mds/aml
+patient_group <- "mds"  #healthy BM/mds/aml
 fcs_dir <- file.path("D:/Internship/data/4. transformed dataset", patient_group)
 
 
@@ -593,7 +605,7 @@ The plots we want to save for inspection are:
 
 ```{r}
 output_dir <- normalizePath(
-  file.path("D:/Internship/data/5. preprocessed dataset", patient_group, "/before_gating/FSCvsSSC"),
+  file.path("D:/Internship/data/5. preprocessed dataset", patient_group, "/before_gating/FSC-AvsFSC-H"),
   mustWork = FALSE
 )
 dir.create(output_dir, showWarnings = FALSE)
@@ -602,17 +614,17 @@ for (name in names(fcs_transformed)) {
   raw_ff <- fcs_transformed[[name]]
   base_name <- tools::file_path_sans_ext(name)
   
-  p <- ggcyto(raw_ff, aes(x = `FS-A`, y = `SS-A`)) +
+  p <- ggcyto(raw_ff, aes(x = `FS-A`, y = `FS-H`)) +
     geom_hex(bins = 128) +
     labs(
-      title = paste("FSC-A vs SSC-A - (before gating):", base_name),
-      x = "FSC-A", y = "SSC-A"
+      title = paste("FSC-A vs FSC-H - (before gating):", base_name),
+      x = "FSC-A", y = "FSC-H"
     ) +
     theme_minimal() +
     scale_fill_viridis_c(option = "C", direction = -1)
   
   ggsave(
-    filename = file.path(output_dir, paste0(base_name, "_FSC-A_vs_SSC-A.png")),
+    filename = file.path(output_dir, paste0(base_name, "_FSC-A_vs_FSC-H.png")),
     plot = p,
     width = 5, height = 5, dpi = 300
   )
@@ -817,23 +829,6 @@ for (name in names(fcs_singles)) {
 Here we change the names of the fluorescent channels to the markers that they actually represent.
 
 ```{r}
-knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
-                      message = FALSE, cache.lazy = FALSE)
-
-patient_group <- "healthy BM"  #healthy BM/mds/aml
-fcs_dir <- file.path("D:/Internship/data/5. preprocessed dataset", patient_group)
-
-
-fcs_file_names <- list.files(path = fcs_dir, pattern = "\\.fcs$", full.names = FALSE)
-fcs_paths <- file.path(fcs_dir, fcs_file_names)
-
-fcs_final <- setNames(
-  lapply(fcs_paths, read.FCS, transformation = FALSE),
-  fcs_file_names
-)
-```
-
-```{r}
 #MANUALLY ADD NAMES OF WHAT EACH CHANNEL REPRESENTS PER TUBE
 tube_markers <- list(
   c("FSC-A", "SSC-A", "IgG1-1", "NA1", "IgG1-2", "CD13", "CD117", "CD34", "NA2", "NA3", "HLA-DR", "CD45", "TIME", "FSC-H"), #Tube 1
@@ -857,7 +852,7 @@ cols_to_keep <- c("FS-A", "SS-A", "FITC", "PE", "ECD", "PC5.5", "PC7", "APC", "A
 
 
 #Changing channel names
-for (fcs_name in names(fcs_final)) {
+for (fcs_name in names(fcs_singles)) {
   tube_num <- getTubeNumber(fcs_name)
   
   if (is.na(tube_num) || tube_num < 1 || tube_num > length(tube_markers)) {
@@ -865,7 +860,7 @@ for (fcs_name in names(fcs_final)) {
     next
   }
   
-  fcs_obj <- fcs_final[[fcs_name]]
+  fcs_obj <- fcs_singles[[fcs_name]]
   
   cols_present <- colnames(fcs_obj@exprs)
   cols_keep_present <- intersect(cols_present, cols_to_keep)
@@ -893,7 +888,7 @@ for (fcs_name in names(fcs_final)) {
   colnames(fcs_obj@exprs) <- new_names
   colnames(fcs_obj) <- new_names  # Updates metadata
 
-  fcs_final[[fcs_name]] <- fcs_obj
+  fcs_singles[[fcs_name]] <- fcs_obj
   
   message(paste("Processed and renamed columns for", fcs_name))
 }
@@ -902,7 +897,7 @@ for (fcs_name in names(fcs_final)) {
 
 ```{r}
 #CHECKING FOR ONE FILE IF RENAMING WAS SUCCESSFULL
-ff_vb <- fcs_final[[3]]
+ff_vb <- fcs_singles[[3]]
 colnames(ff_vb)
 ```
 
@@ -916,9 +911,9 @@ output_dir <- normalizePath(
 )
 dir.create(output_dir, showWarnings = FALSE)
 
-for (file_name in names(fcs_final)) {
+for (file_name in names(fcs_singles)) {
   file_path <- file.path(output_dir, file_name)
-  write.FCS(fcs_final[[file_name]], filename = file_path)
+  write.FCS(fcs_singles[[file_name]], filename = file_path)
 }
 ```
 
@@ -941,7 +936,7 @@ library(matrixStats)
 knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
                       message = FALSE, cache.lazy = FALSE)
 
-patient_group <- "healthy BM"  #healthy BM/mds/aml
+patient_group <- "mds"  #healthy BM/mds/aml
 fcs_dir <- file.path("D:/Internship/data/5. preprocessed dataset", patient_group)
 
 
@@ -972,10 +967,6 @@ output_dir <- file.path("D:/Internship/data/6. merged dataset", patient_group)
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 ```
 
-```{r}
-fcs_patients <- fcs_by_patient[48:50]
-```
-
 The FlowSOM algorithm is designed to operate on a single `.fcs` file. In order to retrieve a MST that contains erythropoiesis, myelopoiesis and monopoiesis, imputation across multiple tubes is required. Specifically, tubes 2, 3, and 4 were combined to display a MST for Ki-67 expression, while tubes 5, 6, and 7 were used to build a MST for Bcl-2 expression analysis.
 
 In previous work, Mestrum et al. (2023) utilized the Infinicyt software for tube merging. Infinicyt applies k-nearest neighbors (kNN) imputation using a single neighbor (k = 1). However, evaluations of merging and imputation quality in flow cytometry data revealed significant limitations in this approach according to Mocking et al. (2023). It was seen that R packages such as CyTOFmerge and CytoBackBone outperformed Infinicyt.
@@ -983,10 +974,6 @@ In previous work, Mestrum et al. (2023) utilized the Infinicyt software for tube
 In this code the `CombineFCS` function of the `CyTOFmerge` package is used to serial merge the panels together. This function uses the same k-NN algorithm however this time with k = 50. For each cell, the values of non-shared markers are imputed by calculating the median expression from its 50 nearest neighbors, ensuring biologically plausible estimates.
 
 *Note: This imputation step is computationally intensive. While the use of the MatrixStats package has improved performance, the process remains time-consuming—merging three tubes per patient currently takes approximately 12 minutes.*
-
-```{r}
-
-```
 
 ```{r}
 CombineFCS <- function(FCS1, RelevantMarkers1, FCS2, RelevantMarkers2, backbone_markers) {
@@ -1114,6 +1101,11 @@ CombineFCS <- function(FCS1, RelevantMarkers1, FCS2, RelevantMarkers2, backbone_
 ```
 
 ```{r}
+#one patient merging
+fcs_patient <- fcs_by_patient[[]]
+```
+
+```{r}
 #MERGING OF FILES
 
 #Manually select which channels to use for merging
@@ -1122,7 +1114,7 @@ marker_list <- list(
   c("FSC-H", "FSC-A", "SSC-A", "Ki-67", "CD14", "CD64", "CD13", "CD117", "CD34", "CD10", "CD11b", "HLA-DR", "CD45"),  #Tube 2
   c("FSC-H", "FSC-A", "SSC-A", "Ki-67", "CD105", "CD123", "CD33", "CD117", "CD71", "CD235a", "HLA-DR", "CD45"), #Tube 3
   c("FSC-H", "FSC-A", "SSC-A","Ki-67","CD33", "CD117", "CD36","HLA-DR", "CD45"), #Tube 4
-  c("FSC-H", "FSC-A", "SSC-A", "CD16", "CD64", "Bcl-2", "CD13", "CD117", "CD34", "CD10", "CD14", "HLA-DR", "CD45"), #Tube 5
+    c("FSC-H", "FSC-A", "SSC-A", "CD16", "CD64", "Bcl-2", "CD13", "CD117", "CD34", "CD10", "CD14", "HLA-DR", "CD45"), #Tube 5
   c("FSC-H", "FSC-A", "SSC-A", "CD105", "Bcl-2", "CD33", "CD117", "CD71", "CD235a", "HLA-DR", "CD45"), #Tube 6
   c("FSC-H", "FSC-A", "SSC-A", "Bcl-2", "CD33", "CD117", "CD36","HLA-DR", "CD45") #Tube 7
 ) 
@@ -1150,26 +1142,21 @@ MultiCombineFCS <- function(file_list, marker_list, backbone_markers) {
   return(combined)
 }
 
-
 backbone_markers <- c("CD45", "HLA-DR", "CD117")  # Define once for reuse
 
-for (patient in names(fcs_patients)) {
+for (patient in names(fcs_by_patient)) {
   cat("Processing patient:", patient, "\n")
   
-  patient_files <- fcs_patients[[patient]]
+  patient_files <- fcs_by_patient[[patient]]
   
   if (length(patient_files) < 2) {
     warning("Not enough tubes to merge for patient: ", patient)
     next
   }
 
-  # Select tubes to merge (change indices as needed)
-  selected_files <- patient_files[c(2:7)]
-
-  # If marker_list is per-patient:
-  # selected_markers <- marker_list[[patient]][c(2:7)]
-  # If marker_list is global:
-  selected_markers <- marker_list[c(2:7)]
+  # Select which tubes to merge by changing indices
+  selected_files <- patient_files[c(2,3,4,6,7)]
+  selected_markers <- marker_list[c(2,3,4,6,7)]
 
   # Merge
   merged_data <- MultiCombineFCS(selected_files, selected_markers, backbone_markers)
@@ -1186,10 +1173,6 @@ for (patient in names(fcs_patients)) {
 }
 ```
 
-```{r}
-
-```
-
 ## STEP 4: AGGREGATE FILES
 
 We aggregate patient files in order to get one `.fcs` file representing the whole disease group. This aggregation step is necessary, as the FlowSOM algorithm requires a single .fcs file as input for training and clustering.
@@ -1198,7 +1181,7 @@ Deutz et al. (2021) opted for a method that selected 40.000 cells per `.fcs`, ho
 
 -   for Healthy group: 40.000 x 50 = 2.000.000
 
--   for MDS patients: 40.000 x 25 = 1.000.000
+-   for MDS patients: 40.000 x 20 = 800.000
 
 -   for AML patients: 40.000 x 18 = 720.000
 
@@ -1231,7 +1214,7 @@ fcs_paths <- file.path(fcs_dir, all_fcs_files)
 
 #set parameters
 set.seed(2020)
-aggregate_cells <- 1960000
+aggregate_cells <- 2000000
 ```
 
 ```{r}
@@ -1245,11 +1228,6 @@ agg <- FlowSOM::AggregateFlowFrames(
 ```
 
 # FLOWSOM
-
-```{r}
-ff_patient <- read.FCS("D:/Internship/data/6. merged dataset/healthy BM/Femoral head 1_merged.fcs")
-expr_ff <- exprs(ff_patient)
-```
 
 ## STEP 1: LOADING IN DATA + LIBRARIES
 
@@ -1265,23 +1243,21 @@ library(dplyr)
 ```
 
 ```{r}
-
-patient_group <- 'healthy BM' #healthy BM/mds/aml
+patient_group <- 'aml' #healthy BM/mds/aml
 dir_results <- file.path("D:/Internship/FlowSOM results", patient_group)
 dir.create(dir_results, showWarnings = FALSE)
 
-ff <- read.FCS("D:/Internship/data/7. aggregated files/healthy BM/all_tubes_aggregated_everything.fcs")
+
+# Path to merged dataset file
+fcs_path <- file.path("D:/Internship/data/7. aggregated files", patient_group, "all_tubes_aggregated_everything.fcs")
+
+# Read FCS file
+ff <- flowCore::read.FCS(fcs_path, transformation = FALSE)
+
 colnames(ff)
 ```
 
-## STEP 2: RUNNING FLOWSOM
-
-You start of with building a tree based on the lineage markers within your panel. This is done to distinguish cell populations within your dataset.
-
-### STEP 2.1.a: TRAINING Cell population Tree
-
 ```{r}
-
 #parameters are here chosen by https://www.youtube.com/watch?v=hP1aTZ1Iqfcthe 10x10 grid most used for smaller panels. 12x12, 15x15 or 20x20 often chosen for larger panels. for metaclusters, recommendation is to choose 1.5 times the amount of clusters you are expecting. Use the scatterplots to finetune. The algorithms to choose the amount of clustering within flowSOM are not recommended as they strongly underestimate the amount of clusters. 
 SOM_x <- 15 
 SOM_y <- 15 
@@ -1297,6 +1273,16 @@ selected_exprs <- expr_matrix[, selected_markers]
 ff_selected <- flowFrame(selected_exprs)
 ```
 
+## STEP 2: RUNNING FLOWSOM
+
+You start of with building a tree based on the lineage markers within your panel. This is done to distinguish cell populations within your dataset.
+
+### STEP 2.1.a: TRAINING Cell population Tree
+
+```{r}
+
+```
+
 ```{r}
 library(FlowSOM)
 fsom <- FlowSOM(input = ff_selected, scale = scaling, 
@@ -1307,20 +1293,20 @@ fsom <- FlowSOM(input = ff_selected, scale = scaling,
 ```
 
 ```{r}
-saveRDS(fsom, file = file.path(dir_results, "fsom_15X15meta20_healthyBM.rds"))
+saveRDS(fsom, file = file.path(dir_results, "fsom_12X12meta20_healthyBM.rds"))
 ```
 
 Plot the FlowSOM tree structure to visualize the clustering results. The `PlotStars` function generates a star plot, which is a common way to visualize FlowSOM results, showing the clusters and their relationships.
 
 ```{r}
 p <- PlotStars(fsom = fsom, backgroundValues = fsom$metaclustering, maxNodeSize=1.5, equalNodeSize=TRUE)
-ggsave(filename = paste0(dir_results, "fsom_tree_20x20meta15_healthyBM.pdf"), plot = p, height = 8.5, width = 11)
+ggsave(filename = paste0(dir_results, "fsom_tree_12x12meta20_healthyBM.pdf"), plot = p, height = 8.5, width = 11)
 ```
 
 Create a report summarizing the FlowSOM results, including cluster information and visualizations. The `FlowSOMmary` function generates a comprehensive report that can be saved as a PDF file.
 
 ```{r}
-FlowSOMmary(fsom, plotFile = paste0(dir_results, "fsom_summary_20x20meta15_healthyBM.pdf"))
+FlowSOMmary(fsom, plotFile = paste0(dir_results, "fsom_summary_12x12meta20_healthyBM.pdf"))
 ```
 
 ### STEP 2.1.b: Extracting established fSOM from .RDS file
@@ -1337,7 +1323,8 @@ library(dplyr)
 ```
 
 ```{r}
-fsom <- readRDS("D:/Internship/FlowSOM results/healthy BM/everything/(15x15) 20 meta/fsom_15X15meta20_healthyBM.rds")
+library(FlowSOM)
+fsom <- readRDS("D:/Internship/FlowSOM results/aml/fsom_15X15meta20_aml.rds")
 ```
 
 ## STEP 3: Inspecting cells in 2D scatterplots
@@ -1345,17 +1332,17 @@ fsom <- readRDS("D:/Internship/FlowSOM results/healthy BM/everything/(15x15) 20 
 A good way to determine the cluster quality of the chosen parameters, we can look at the scatterplots.
 
 ```{r}
-
-```
-
-```{r}
 #SCATTERPLOTS
-channel_pairs = list(c("CD45", "SSC-A"), c("CD13", "SSC-A")) 
+channel_pairs <- list(
+  c("CD45", "SSC-A"),
+  c("CD13", "SSC-A"),
+  c("HLA-DR", "CD117")
+) 
 
-metaclusters_of_interest <- c(4,7) #seq_len(n_meta)
+metaclusters_of_interest <- c(16) #seq_len(n_meta)
 clusters_of_interest <- NULL
 
-Plot2DScatters(fsom = fsom, channelpairs = channel_pairs, metaclusters = metaclusters_of_interest, clusters = clusters_of_interest, plotFile = paste0(dir_results, "fsom_2D_lymph_scatterplot_metaclusters.png"), centers = FALSE, density=FALSE)
+Plot2DScatters(fsom = fsom, channelpairs = channel_pairs, metaclusters = metaclusters_of_interest, clusters = clusters_of_interest, plotFile = paste0(dir_results, "fsom_2D_lymph_scatterplot_metacluster.png"), centers = FALSE, density=FALSE)
 ```
 
 ## STEP 4: Expression functional markers
@@ -1367,4 +1354,63 @@ Once the clustering is deemed of quality, we can express the amount of Ki-67/Bcl
 p2 <- PlotMarker(fsom = fsom, marker = 'Ki-67', maxNodeSize=1, equalNodeSize=TRUE)
 
 ggsave(filename = paste0(dir_results, "fsom_tree_Ki-67_expression.pdf"), plot = p2, height = 8.5, width = 11)
+```
+
+## STEP 5: Plot Tree with manual labels
+
+```{r}
+# Define labels and associated metacluster IDs
+metacluster_groups <- list(
+  "Mature Erythroids"     = c(5),
+  "Immature Erythroids"   = c(),
+  "Mature Myeloids"       = c(2,3,6),
+  "Immature Myeloids"     = c(1,8,9,18),
+  "Platelets"             = c(),
+  "Blasts"                = c(4,13,14,15),
+  "CD36-/CD71+ cells"     = c(),
+  "Eosinophils"           = c(17),
+  "Debris"                = c(7,19),
+  "Mature Monocytes"      = c(10,11,12),
+  "Lymphocytes"           = c(16),
+  "Other"                 = c(20)
+)
+
+celltype_colors <- c(
+  "Mature Erythroids"     = "#e41a1c",  # red
+  "Immature Erythroids"   = "#ff7f00",  # orange
+  "Mature Myeloids"       = "#984ea3",  # blue
+  "Immature Myeloids"     = "#f20a90",  # green
+  "Platelets"             = "#ffff33",  # purple
+  "Blasts"                = "#4daf4a",  # brown
+  "CD36-/CD71+ cells"     = "#f781bf",  # pink
+  "Eosinophils"           = "#377eb8",  # grey
+  "Debris"                = "#000000",  # light grey
+  "Mature Monocytes"      = "#253bfc",  # teal
+  "Lymphocytes"           = "#23f8d6",  # yellow
+  "Other"                 = "#bcbcbc"   # neutral light grey
+)
+
+
+# Initialize all as "Unlabeled"
+metacluster_annotation <- rep("Unlabeled", n_meta)
+
+# Assign labels based on your grouping
+for (label in names(metacluster_groups)) {
+  ids <- metacluster_groups[[label]]
+  metacluster_annotation[ids] <- label
+}
+
+# Add metacluster labels to FlowSOM object
+fsom$metaclustering_labels <- metacluster_annotation[fsom$metaclustering]
+
+```
+
+```{r}
+p <- PlotStars(fsom = fsom,
+          backgroundValues = fsom$metaclustering_labels,
+          backgroundColors = celltype_colors,
+          maxNodeSize=1.3,
+          equalNodeSize=TRUE)
+
+ggsave(filename = paste0(dir_results, "fsom_tree_15x15meta20_aml_manual.pdf"), plot = p, height = 8.5, width = 13)
 ```
