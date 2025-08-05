@@ -1229,7 +1229,7 @@ agg <- FlowSOM::AggregateFlowFrames(
 
 # FLOWSOM
 
-## STEP 1: LOADING IN DATA + LIBRARIES
+## LOADING IN DATA + LIBRARIES
 
 ```{r}
 library('flowCore') 
@@ -1273,15 +1273,11 @@ selected_exprs <- expr_matrix[, selected_markers]
 ff_selected <- flowFrame(selected_exprs)
 ```
 
-## STEP 2: RUNNING FLOWSOM
+## RUNNING FLOWSOM
 
 You start of with building a tree based on the lineage markers within your panel. This is done to distinguish cell populations within your dataset.
 
-### STEP 2.1.a: TRAINING Cell population Tree
-
-```{r}
-
-```
+### TRAINING Cell population Tree
 
 ```{r}
 library(FlowSOM)
@@ -1293,14 +1289,8 @@ fsom <- FlowSOM(input = ff_selected, scale = scaling,
 ```
 
 ```{r}
+#saving trained tree
 saveRDS(fsom, file = file.path(dir_results, "fsom_12X12meta20_healthyBM.rds"))
-```
-
-Plot the FlowSOM tree structure to visualize the clustering results. The `PlotStars` function generates a star plot, which is a common way to visualize FlowSOM results, showing the clusters and their relationships.
-
-```{r}
-p <- PlotStars(fsom = fsom, backgroundValues = fsom$metaclustering, maxNodeSize=1.5, equalNodeSize=TRUE)
-ggsave(filename = paste0(dir_results, "fsom_tree_12x12meta20_healthyBM.pdf"), plot = p, height = 8.5, width = 11)
 ```
 
 Create a report summarizing the FlowSOM results, including cluster information and visualizations. The `FlowSOMmary` function generates a comprehensive report that can be saved as a PDF file.
@@ -1309,7 +1299,7 @@ Create a report summarizing the FlowSOM results, including cluster information a
 FlowSOMmary(fsom, plotFile = paste0(dir_results, "fsom_summary_12x12meta20_healthyBM.pdf"))
 ```
 
-### STEP 2.1.b: Extracting established fSOM from .RDS file
+### Extracting established Tree from .RDS file
 
 ```{r}
 library('flowCore') 
@@ -1327,9 +1317,15 @@ library(FlowSOM)
 fsom <- readRDS("D:/Internship/FlowSOM results/aml/fsom_15X15meta20_aml.rds")
 ```
 
-## STEP 3: Inspecting cells in 2D scatterplots
+## MANUAL LABELING
 
-A good way to determine the cluster quality of the chosen parameters, we can look at the scatterplots.
+In order to establish which metaclusters represent which types of cells, it is usefull to look at 2D scatterplots.
+
+-   `channel_pairs` = which scatterplots do we want to create
+
+-   `metaclusters_of_interest` = which metaclusters do we want to create the scatterplots of? If equal to seq_len(n_meta) for all metaclusters scatterplots are made
+
+-   `clusters_of_interest` = if you want to visualize one node. `metaclusters_of_interest` should in this case be 0.
 
 ```{r}
 #SCATTERPLOTS
@@ -1339,34 +1335,24 @@ channel_pairs <- list(
   c("HLA-DR", "CD117")
 ) 
 
+#which metacluster/node
 metaclusters_of_interest <- c(16) #seq_len(n_meta)
-clusters_of_interest <- NULL
+node_of_interest <- NULL
 
-Plot2DScatters(fsom = fsom, channelpairs = channel_pairs, metaclusters = metaclusters_of_interest, clusters = clusters_of_interest, plotFile = paste0(dir_results, "fsom_2D_lymph_scatterplot_metacluster.png"), centers = FALSE, density=FALSE)
+Plot2DScatters(fsom = fsom, channelpairs = channel_pairs, metaclusters = metaclusters_of_interest, clusters = node_of_interest, plotFile = paste0(dir_results, "fsom_2D_lymph_scatterplot_metacluster.png"), centers = FALSE, density=FALSE)
 ```
 
-## STEP 4: Expression functional markers
-
-Once the clustering is deemed of quality, we can express the amount of Ki-67/Bcl-2 expression of the metaclusters. This will give us information about the pattern of expression.
+Once you define which metaclusters represent which celltypes, you can add the manual labels to the flowSOM object and visualize.
 
 ```{r}
-
-p2 <- PlotMarker(fsom = fsom, marker = 'Ki-67', maxNodeSize=1, equalNodeSize=TRUE)
-
-ggsave(filename = paste0(dir_results, "fsom_tree_Ki-67_expression.pdf"), plot = p2, height = 8.5, width = 11)
-```
-
-## STEP 5: Plot Tree with manual labels
-
-```{r}
-# Define labels and associated metacluster IDs
+#Define labels and associated metacluster IDs
 metacluster_groups <- list(
   "Mature Erythroids"     = c(5),
   "Immature Erythroids"   = c(),
   "Mature Myeloids"       = c(2,3,6),
   "Immature Myeloids"     = c(1,8,9,18),
   "Platelets"             = c(),
-  "Blasts"                = c(4,13,14,15),
+  "Blasts"                = c(13,14,15,4),
   "CD36-/CD71+ cells"     = c(),
   "Eosinophils"           = c(17),
   "Debris"                = c(7,19),
@@ -1375,42 +1361,76 @@ metacluster_groups <- list(
   "Other"                 = c(20)
 )
 
+#define color scheme for best visualisation
 celltype_colors <- c(
-  "Mature Erythroids"     = "#e41a1c",  # red
-  "Immature Erythroids"   = "#ff7f00",  # orange
-  "Mature Myeloids"       = "#984ea3",  # blue
-  "Immature Myeloids"     = "#f20a90",  # green
-  "Platelets"             = "#ffff33",  # purple
-  "Blasts"                = "#4daf4a",  # brown
-  "CD36-/CD71+ cells"     = "#f781bf",  # pink
-  "Eosinophils"           = "#377eb8",  # grey
-  "Debris"                = "#000000",  # light grey
-  "Mature Monocytes"      = "#253bfc",  # teal
-  "Lymphocytes"           = "#23f8d6",  # yellow
-  "Other"                 = "#bcbcbc"   # neutral light grey
+  "Mature Erythroids"     = "#e41a1c",  #red
+  "Immature Erythroids"   = "#ff7f00",  #orange
+  "Mature Myeloids"       = "#984ea3",  #purple
+  "Immature Myeloids"     = "#f20a90",  #bright pink
+  "Platelets"             = "#ffff33",  #yellow
+  "Blasts"                = "#4daf4a",  #green
+  "CD36-/CD71+ cells"     = "#f781bf",  #light pink
+  "Eosinophils"           = "#377eb8",  #light grey
+  "Debris"                = "#000000",  #black
+  "Mature Monocytes"      = "#253bfc",  #bright blue
+  "Lymphocytes"           = "#23f8d6",  #teal
+  "Other"                 = "#bcbcbc"   #grey
 )
 
 
-# Initialize all as "Unlabeled"
+#Assign labels based on your grouping
 metacluster_annotation <- rep("Unlabeled", n_meta)
-
-# Assign labels based on your grouping
 for (label in names(metacluster_groups)) {
   ids <- metacluster_groups[[label]]
   metacluster_annotation[ids] <- label
 }
 
-# Add metacluster labels to FlowSOM object
+#Add metacluster labels to FlowSOM object and save
 fsom$metaclustering_labels <- metacluster_annotation[fsom$metaclustering]
-
+saveRDS(fsom, file = file.path(dir_results, "fsom_15X15meta20_aml.rds"))
 ```
 
 ```{r}
+#visualise tree with manual labels
 p <- PlotStars(fsom = fsom,
           backgroundValues = fsom$metaclustering_labels,
           backgroundColors = celltype_colors,
           maxNodeSize=1.3,
           equalNodeSize=TRUE)
 
-ggsave(filename = paste0(dir_results, "fsom_tree_15x15meta20_aml_manual.pdf"), plot = p, height = 8.5, width = 13)
+ggsave(filename = paste0(dir_results, "fsom_tree_15x15meta20_healthy_manual.pdf"), plot = p, height = 8.5, width = 13)
+```
+
+## CELL COUNT
+
+In order to quantify the trees for comparison, we can calculate cell percentages of each cell type
+
+```{r}
+
+node_assignments <- fsom$map$mapping[,1]
+cell_labels <- fsom$metaclustering_labels[node_assignments]
+label_counts <- table(cell_labels)
+
+#COnvert results to dataframe
+label_counts_df <- as.data.frame(label_counts)
+colnames(label_counts_df) <- c("Label", "CellCount")
+total_cells <- sum(label_counts_df$CellCount)
+label_counts_df$Percentage <- round(100 * label_counts_df$CellCount / total_cells, 2)
+
+#View result and save
+print(label_counts_df)
+write.csv(label_counts_df,
+          file = "D:/Internship/FlowSOM results/aml/cell_counts_per_label.csv",
+          row.names = FALSE)
+```
+
+## EXPRESSION TREES FUNCTIONAL MARKERS
+
+Once the clustering is deemed of quality, we can express the amount of Ki-67/Bcl-2 expression of the metaclusters. This will give us information about the pattern of expression.
+
+```{r}
+#expression trees
+p2 <- PlotMarker(fsom = fsom, marker = 'Ki-67', maxNodeSize=1, equalNodeSize=TRUE)
+
+ggsave(filename = paste0(dir_results, "fsom_tree_Ki-67_expression.pdf"), plot = p2, height = 8.5, width = 11)
 ```
