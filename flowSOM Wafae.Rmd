@@ -1243,7 +1243,7 @@ library(dplyr)
 ```
 
 ```{r}
-patient_group <- 'aml' #healthy BM/mds/aml
+patient_group <- 'mds' #healthy BM/mds/aml
 dir_results <- file.path("D:/Internship/FlowSOM results", patient_group)
 dir.create(dir_results, showWarnings = FALSE)
 
@@ -1314,7 +1314,7 @@ library(dplyr)
 
 ```{r}
 library(FlowSOM)
-fsom <- readRDS("D:/Internship/FlowSOM results/aml/fsom_15X15meta20_aml.rds")
+fsom <- readRDS("D:/Internship/FlowSOM results/mds/fsom_15X15meta20_mds.rds")
 ```
 
 ## MANUAL LABELING
@@ -1336,10 +1336,10 @@ channel_pairs <- list(
 ) 
 
 #which metacluster/node
-metaclusters_of_interest <- c(16) #seq_len(n_meta)
+metaclusters_of_interest <- c(6,13,15) #seq_len(n_meta)
 node_of_interest <- NULL
 
-Plot2DScatters(fsom = fsom, channelpairs = channel_pairs, metaclusters = metaclusters_of_interest, clusters = node_of_interest, plotFile = paste0(dir_results, "fsom_2D_lymph_scatterplot_metacluster.png"), centers = FALSE, density=FALSE)
+Plot2DScatters(fsom = fsom, channelpairs = channel_pairs, metaclusters = metaclusters_of_interest, clusters = node_of_interest, plotFile = paste0(dir_results, "fsom_2D_lymph_scatterplot_metaclusters.png"), sizePoints=1.5, centers = FALSE, density=FALSE)
 ```
 
 Once you define which metaclusters represent which celltypes, you can add the manual labels to the flowSOM object and visualize.
@@ -1347,18 +1347,18 @@ Once you define which metaclusters represent which celltypes, you can add the ma
 ```{r}
 #Define labels and associated metacluster IDs
 metacluster_groups <- list(
-  "Mature Erythroids"     = c(5),
-  "Immature Erythroids"   = c(),
-  "Mature Myeloids"       = c(2,3,6),
-  "Immature Myeloids"     = c(1,8,9,18),
+  "Mature Erythroids"     = c(3,4),
+  "Immature Erythroids"   = c(2),
+  "Mature Myeloids"       = c(14,11,16,17,18),
+  "Immature Myeloids"     = c(5,9),
   "Platelets"             = c(),
-  "Blasts"                = c(13,14,15,4),
+  "Blasts"                = c(1,7),
   "CD36-/CD71+ cells"     = c(),
-  "Eosinophils"           = c(17),
-  "Debris"                = c(7,19),
-  "Mature Monocytes"      = c(10,11,12),
-  "Lymphocytes"           = c(16),
-  "Other"                 = c(20)
+  "Eosinophils"           = c(8),
+  "Debris"                = c(19),
+  "Mature Monocytes"      = c(10),
+  "Lymphocytes"           = c(6,13,15),
+  "Other"                 = c(20,12)
 )
 
 #define color scheme for best visualisation
@@ -1387,7 +1387,7 @@ for (label in names(metacluster_groups)) {
 
 #Add metacluster labels to FlowSOM object and save
 fsom$metaclustering_labels <- metacluster_annotation[fsom$metaclustering]
-saveRDS(fsom, file = file.path(dir_results, "fsom_15X15meta20_aml.rds"))
+saveRDS(fsom, file = file.path(dir_results, "fsom_15X15meta20_mds (2).rds"))
 ```
 
 ```{r}
@@ -1398,7 +1398,7 @@ p <- PlotStars(fsom = fsom,
           maxNodeSize=1.3,
           equalNodeSize=TRUE)
 
-ggsave(filename = paste0(dir_results, "fsom_tree_15x15meta20_healthy_manual.pdf"), plot = p, height = 8.5, width = 13)
+ggsave(filename = paste0(dir_results, "fsom_tree_15x15meta20_mds_manual.pdf"), plot = p, height = 8.5, width = 13)
 ```
 
 ## CELL COUNT
@@ -1411,7 +1411,7 @@ node_assignments <- fsom$map$mapping[,1]
 cell_labels <- fsom$metaclustering_labels[node_assignments]
 label_counts <- table(cell_labels)
 
-#COnvert results to dataframe
+#Convert results to dataframe
 label_counts_df <- as.data.frame(label_counts)
 colnames(label_counts_df) <- c("Label", "CellCount")
 total_cells <- sum(label_counts_df$CellCount)
@@ -1429,8 +1429,118 @@ write.csv(label_counts_df,
 Once the clustering is deemed of quality, we can express the amount of Ki-67/Bcl-2 expression of the metaclusters. This will give us information about the pattern of expression.
 
 ```{r}
-#expression trees
-p2 <- PlotMarker(fsom = fsom, marker = 'Ki-67', maxNodeSize=1, equalNodeSize=TRUE)
+library(FlowSOM)
+fsom <- readRDS("D:/Internship/FlowSOM results/mds/fsom_15X15meta20_mds (2).rds")
 
-ggsave(filename = paste0(dir_results, "fsom_tree_Ki-67_expression.pdf"), plot = p2, height = 8.5, width = 11)
+#expression trees
+p2 <- PlotMarker(fsom = fsom, marker = 'Bcl-2', maxNodeSize=1, equalNodeSize=TRUE)
+
+ggsave(filename = paste0(dir_results, "fsom_tree_Bcl2_expression.pdf"), plot = p2, height = 8.5, width = 11)
+```
+
+## STATISTICAL TESTING
+```{r}
+library('flowCore') 
+library('ggplot2')
+library('flowAI')
+library('readxl')
+library('ggcyto')
+library('openCyto')
+library('flowClust')
+library(dplyr)
+```
+
+
+```{r}
+#expression values per manual labeled group
+library(dplyr)
+library(FlowSOM)
+fsom_BM <- readRDS("D:/Internship/FlowSOM results/healthy BM/fsom_12X12meta20_healthyB.rds")
+fsom_MDS <- readRDS("D:/Internship/FlowSOM results/mds/fsom_15X15meta20_mds (2).rds")
+fsom_AML <- readRDS("D:/Internship/FlowSOM results/aml/fsom_15X15meta20_AML (2).rds")
+
+# 1. Extract expression data from FlowSOM objects
+expr_BM <- as.data.frame(fsom_BM$data)
+expr_MDS <- as.data.frame(fsom_MDS$data)
+expr_AML <- as.data.frame(fsom_AML$data)
+
+# BM
+expr_BM$node <- fsom_BM$map$mapping[,1]
+expr_BM$manual_label <- fsom_BM$metaclustering_labels[expr_BM$node]
+expr_BM$disease <- "BM"
+
+# MDS
+expr_MDS$node <- fsom_MDS$map$mapping[,1]
+expr_MDS$manual_label <- fsom_MDS$metaclustering_labels[expr_MDS$node]
+expr_MDS$disease <- "MDS"
+
+# AML
+expr_AML$node <- fsom_AML$map$mapping[,1]
+expr_AML$manual_label <- fsom_AML$metaclustering_labels[expr_AML$node]
+expr_AML$disease <- "AML"
+
+expr_all <- bind_rows(expr_BM, expr_MDS, expr_AML)
+
+node_summary <- expr_all %>%
+  group_by(disease, manual_label, node) %>%
+  summarise(across(c("Ki-67", "Bcl-2"), mean, na.rm = TRUE), .groups = "drop")
+
+write.csv(node_summary, "D:/Internship/FlowSOM results/nodesum.csv", row.names = FALSE)
+```
+
+```{r}
+library(dplyr)
+library(effsize)
+library(purrr)
+
+# Your disease pairs to compare
+disease_pairs <- list(
+  c("BM", "MDS"),
+  c("BM", "AML"),
+  c("MDS", "AML")
+)
+
+markers <- c("Ki-67", "Bcl-2")
+
+# Run comparisons per manual_label and marker
+results <- expand.grid(
+  manual_label = unique(expr_all$manual_label),
+  marker = markers,
+  stringsAsFactors = FALSE
+) %>%
+  mutate(comparisons = pmap(list(manual_label, marker), function(label, marker) {
+    df <- expr_all %>% filter(manual_label == label)
+    
+    map_dfr(disease_pairs, function(pair) {
+      g1 <- df %>% filter(disease == pair[1]) %>% pull(marker)
+      g2 <- df %>% filter(disease == pair[2]) %>% pull(marker)
+      
+      if (length(g1) < 2 || length(g2) < 2) return(NULL)
+      
+      test <- wilcox.test(g1, g2, exact = FALSE)
+      delta <- cliff.delta(g1, g2)$estimate
+      
+      tibble(
+        Disease_1 = pair[1],
+        Disease_2 = pair[2],
+        Wilcoxon_p = test$p.value,
+        Cliffs_delta = round(delta, 2),
+        Median_1 = median(g1, na.rm = TRUE),
+        Median_2 = median(g2, na.rm = TRUE)
+      )
+    })
+  })) %>%
+  unnest(comparisons)
+
+# Apply Bonferroni correction
+results <- results %>%
+  mutate(
+    Bonferroni_p = pmin(Wilcoxon_p * n(), 1),
+    Significant = Bonferroni_p < 0.05
+  )
+
+# Save the results to a CSV file
+write.csv(results, "D:/Internship/FlowSOM results/manual_label_wilcox_cliffs.csv", row.names = FALSE)
+
+
 ```
