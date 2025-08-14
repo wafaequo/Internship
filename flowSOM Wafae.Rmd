@@ -1412,6 +1412,7 @@ ggsave(filename = paste0(dir_results, "fsom_tree_15x15meta20_mds_manual.pdf"), p
 ```
 
 ## STEP 4: DATA ANALYSIS
+
 ```{r}
 library('flowCore') 
 library('ggplot2')
@@ -1496,7 +1497,9 @@ pheatmap(mfi_table, scale = "column")
 
 ### STEP 4.5 - STATISTICAL TESTING
 
-In order to see if differences per celltype can be found between disease states, statistical testing was employed. Wilcoxon Rank-Sum Test are performed with Benferroni correction. For the effect size, cliff's delta is calculated. 
+In order to see if differences per celltype can be found between disease states, statistical testing was employed. Wilcoxon Rank-Sum Test are performed with Benferroni correction. For the effect size, cliff's delta is calculated.
+
+*NOTE: during calculation of cliff's delta, NA was seen due to integer overflow. Thus for calculating cliff's delta, downsampling is applied to get idea.*
 
 ```{r}
 #DATA EXTRACTION
@@ -1542,37 +1545,41 @@ disease_pairs <- list(
 
 markers <- c("Ki-67", "Bcl-2") #which markers?
 
-results <- expand.grid(
-  manual_label = unique(expr_all$manual_label),
-  marker = markers,
-  stringsAsFactors = FALSE
-) %>%
-  mutate(comparisons = pmap(list(manual_label, marker), function(label, marker) {
-    df <- expr_all %>% filter(manual_label == label)
-    
-    map_dfr(disease_pairs, function(pair) {
-      g1 <- df %>% filter(disease == pair[1]) %>% pull(marker)
-      g2 <- df %>% filter(disease == pair[2]) %>% pull(marker)
-      
-      if (length(g1) < 2 || length(g2) < 2) return(NULL)
-      
-      test <- wilcox.test(g1, g2, exact = FALSE) #statistical test
-      delta <- cliff.delta(g1, g2)$estimate #cliff's delta calculation
-      
-      tibble(
-        Disease_1 = pair[1],
-        Disease_2 = pair[2],
-        Wilcoxon_p = test$p.value,
-        Cliffs_delta = round(delta, 2),
-        Median_1 = median(g1, na.rm = TRUE),
-        Median_2 = median(g2, na.rm = TRUE)
-      )
-    })
-  })) %>%
-  unnest(comparisons)
+#convert data to long format
+df_long <- expr_all %>%
+  select(manual_label, disease, all_of(markers)) %>%  # keep only relevant columns
+  pivot_longer(cols = all_of(markers),
+               names_to = "marker",
+               values_to = "value")
 
-#Bonferroni correction
-results <- results %>%
+#STATISTICAL ANALYSIS
+run_stats <- function(data) {
+  map_dfr(disease_pairs, function(pair) {
+    g1 <- filter(data, disease == pair[1]) %>% pull(value)
+    g2 <- filter(data, disease == pair[2]) %>% pull(value)
+    
+    if (length(g1) < 2 || length(g2) < 2) return(NULL)
+    
+    max_sample <- 10000
+    g1_s <- if(length(g1) > max_sample) sample(g1, max_sample) else g1
+    g2_s <- if(length(g2) > max_sample) sample(g2, max_sample) else g2
+    
+    
+    tibble(
+      Disease_1 = pair[1],
+      Disease_2 = pair[2],
+      Wilcoxon_p = wilcox.test(g1, g2, exact = FALSE)$p.value, #statistical test
+      Cliffs_delta = round(cliff.delta(g1_s, g2_s)$estimate, 2), #cliff's delta
+      Median_1 = median(g1, na.rm = TRUE),
+      Median_2 = median(g2, na.rm = TRUE)
+    )
+  })
+}
+
+results <- df_long %>%
+  group_by(manual_label, marker) %>%
+  group_modify(~ run_stats(.x)) %>%
+  ungroup() %>%
   mutate(
     Bonferroni_p = pmin(Wilcoxon_p * n(), 1),
     Significant = Bonferroni_p < 0.05
