@@ -1181,7 +1181,7 @@ Deutz et al. (2021) opted for a method that selected 40.000 cells per `.fcs`, ho
 
 -   for Healthy group: 40.000 x 50 = 2.000.000
 
--   for MDS patients: 40.000 x 20 = 800.000
+-   for MDS patients: 40.000 x 18 = 720.000
 
 -   for AML patients: 40.000 x 18 = 720.000
 
@@ -1229,7 +1229,9 @@ agg <- FlowSOM::AggregateFlowFrames(
 
 # FLOWSOM
 
-## LOADING IN DATA + LIBRARIES
+In this section of the code, the actual implementation and analysis of flowSOM objects are done. Start from step 1 if you still need to train the fSOM object. When you already have a trained and manually labeled fSOM object start from step 2.
+
+## STEP 1: TRAINING FSOM
 
 ```{r}
 library('flowCore') 
@@ -1239,21 +1241,19 @@ library('readxl')
 library('ggcyto')
 library('openCyto')
 library('flowClust')
+library(FlowSOM)
 library(dplyr)
 ```
+
+### STEP 1.1 - LOADING IN DATA + PARAMETERS
 
 ```{r}
 patient_group <- 'mds' #healthy BM/mds/aml
 dir_results <- file.path("D:/Internship/FlowSOM results", patient_group)
 dir.create(dir_results, showWarnings = FALSE)
-
-
-# Path to merged dataset file
 fcs_path <- file.path("D:/Internship/data/7. aggregated files", patient_group, "all_tubes_aggregated_everything.fcs")
 
-# Read FCS file
 ff <- flowCore::read.FCS(fcs_path, transformation = FALSE)
-
 colnames(ff)
 ```
 
@@ -1261,26 +1261,23 @@ colnames(ff)
 #parameters are here chosen by https://www.youtube.com/watch?v=hP1aTZ1Iqfcthe 10x10 grid most used for smaller panels. 12x12, 15x15 or 20x20 often chosen for larger panels. for metaclusters, recommendation is to choose 1.5 times the amount of clusters you are expecting. Use the scatterplots to finetune. The algorithms to choose the amount of clustering within flowSOM are not recommended as they strongly underestimate the amount of clusters. 
 SOM_x <- 15 
 SOM_y <- 15 
-n_meta <- 20 
+n_meta <- 20 #how many metaclusters?
 seed <- 2020 
 scaling <- FALSE
 
 expr_matrix <- exprs(ff)
 
-excluded_markers <- c("File", "File_scattered", "Original_ID", "FSC-H")
+excluded_markers <- c("File", "File_scattered", "Original_ID", "FSC-H") #which markers do I not include for training?
 selected_markers <- setdiff(colnames(expr_matrix), excluded_markers)
 selected_exprs <- expr_matrix[, selected_markers]
 ff_selected <- flowFrame(selected_exprs)
 ```
 
-## RUNNING FLOWSOM
+### STEP 1.2 - TRAINING FLOWSOM
 
 You start of with building a tree based on the lineage markers within your panel. This is done to distinguish cell populations within your dataset.
 
-### TRAINING Cell population Tree
-
 ```{r}
-library(FlowSOM)
 fsom <- FlowSOM(input = ff_selected, scale = scaling, 
                 seed = seed, 
                 nClus = n_meta, 
@@ -1293,13 +1290,15 @@ fsom <- FlowSOM(input = ff_selected, scale = scaling,
 saveRDS(fsom, file = file.path(dir_results, "fsom_12X12meta20_healthyBM.rds"))
 ```
 
+### STEP 1.3 - FLOWSOM SUMMARY
+
 Create a report summarizing the FlowSOM results, including cluster information and visualizations. The `FlowSOMmary` function generates a comprehensive report that can be saved as a PDF file.
 
 ```{r}
 FlowSOMmary(fsom, plotFile = paste0(dir_results, "fsom_summary_12x12meta20_healthyBM.pdf"))
 ```
 
-### Extracting established Tree from .RDS file
+## STEP 2: EXTRACTING TRAINED FSOM OBJECT (NOT MANUALLY LABELED)
 
 ```{r}
 library('flowCore') 
@@ -1309,15 +1308,27 @@ library('readxl')
 library('ggcyto')
 library('openCyto')
 library('flowClust')
+library(FlowSOM)
 library(dplyr)
 ```
 
 ```{r}
-library(FlowSOM)
-fsom <- readRDS("D:/Internship/FlowSOM results/mds/fsom_15X15meta20_mds.rds")
+#parameters needed for further analysis
+patient_group <- 'mds' #healthy BM/mds/aml
+dir_results <- file.path("D:/Internship/FlowSOM results", patient_group)
+dir.create(dir_results, showWarnings = FALSE)
+
+SOM_x <- 15 
+SOM_y <- 15 
+n_meta <- 20 #how many metaclusters?
+seed <- 2020 
+scaling <- FALSE
+
+#extracting trained fsom object
+fsom <- readRDS("D:/Internship/FlowSOM results/mds/fsom_15X15meta20_mds (2).rds")
 ```
 
-## MANUAL LABELING
+## STEP 3: MANUAL LABELING
 
 In order to establish which metaclusters represent which types of cells, it is usefull to look at 2D scatterplots.
 
@@ -1331,15 +1342,14 @@ In order to establish which metaclusters represent which types of cells, it is u
 #SCATTERPLOTS
 channel_pairs <- list(
   c("CD45", "SSC-A"),
-  c("CD13", "SSC-A"),
-  c("HLA-DR", "CD117")
+  c("CD13", "CD117")
 ) 
 
 #which metacluster/node
-metaclusters_of_interest <- c(6,13,15) #seq_len(n_meta)
+metaclusters_of_interest <- c(1,7) #seq_len(n_meta)
 node_of_interest <- NULL
 
-Plot2DScatters(fsom = fsom, channelpairs = channel_pairs, metaclusters = metaclusters_of_interest, clusters = node_of_interest, plotFile = paste0(dir_results, "fsom_2D_lymph_scatterplot_metaclusters.png"), sizePoints=1.5, centers = FALSE, density=FALSE)
+Plot2DScatters(fsom = fsom, channelpairs = channel_pairs, metaclusters = metaclusters_of_interest, clusters = node_of_interest, plotFile = paste0(dir_results, "fsom_2D_myeloblasts_scatterplots.png"), sizePoints=1.5, centers = FALSE, density=FALSE)
 ```
 
 Once you define which metaclusters represent which celltypes, you can add the manual labels to the flowSOM object and visualize.
@@ -1401,17 +1411,64 @@ p <- PlotStars(fsom = fsom,
 ggsave(filename = paste0(dir_results, "fsom_tree_15x15meta20_mds_manual.pdf"), plot = p, height = 8.5, width = 13)
 ```
 
-## CELL COUNT
+## STEP 4: DATA ANALYSIS
+```{r}
+library('flowCore') 
+library('ggplot2')
+library('flowAI')
+library('readxl')
+library('ggcyto')
+library('openCyto')
+library('flowClust')
+library(FlowSOM)
+library(dplyr)
+library(pheatmap)
+library(effsize)
+library(purrr)
+library(tidyr)
+```
 
-In order to quantify the trees for comparison, we can calculate cell percentages of each cell type
+### STEP 4.1 - LOAD IN MANUALLY LABELED FSOM OBJECT
 
 ```{r}
+#parameters needed for further analysis
+patient_group <- 'mds' #healthy BM/mds/aml
+dir_results <- file.path("D:/Internship/FlowSOM results", patient_group)
+dir.create(dir_results, showWarnings = FALSE)
 
+SOM_x <- 15 
+SOM_y <- 15 
+n_meta <- 20 #how many metaclusters?
+seed <- 2020 
+scaling <- FALSE
+
+#extracting manually labeled fsom object
+fsom <- readRDS("D:/Internship/FlowSOM results/mds/fsom_15X15meta20_mds (2).rds")
+```
+
+### STEP 4.2 - EXPRESSION TREES FUNCTIONAL MARKERS
+
+Once the clustering is deemed of quality, we can express the amount of Ki-67/Bcl-2 expression of the metaclusters. This will give us information about the pattern of expression.
+
+```{r}
+#expression trees
+p2 <- PlotMarker(fsom = fsom, marker = 'Bcl-2', maxNodeSize=1, equalNodeSize=TRUE)
+ggsave(filename = paste0(dir_results, "fsom_tree_Bcl2_expression.pdf"), plot = p2, height = 8.5, width = 11)
+```
+
+### STEP 4.3 - CELL COUNTS
+
+As AML and MDS are disease states known for an elevated amount of celltypes, it is usefull to investigate the cell percentages and compare this with literature. Thus in this section, cell percentages are calculated for each manually defined celltype.
+
+NOTE: bone marrow aspirates provide only a general overview of bone marrow cellularity. So we can only make a general comparison of cell proportions using reference values from differential counts.
+
+```{r}
+#labeling events with celltype
 node_assignments <- fsom$map$mapping[,1]
 cell_labels <- fsom$metaclustering_labels[node_assignments]
 label_counts <- table(cell_labels)
 
-#Convert results to dataframe
+#setting up dataframe
 label_counts_df <- as.data.frame(label_counts)
 colnames(label_counts_df) <- c("Label", "CellCount")
 total_cells <- sum(label_counts_df$CellCount)
@@ -1424,42 +1481,29 @@ write.csv(label_counts_df,
           row.names = FALSE)
 ```
 
-## EXPRESSION TREES FUNCTIONAL MARKERS
+### STEP 4.4 - HEATMAPS
 
-Once the clustering is deemed of quality, we can express the amount of Ki-67/Bcl-2 expression of the metaclusters. This will give us information about the pattern of expression.
+In order to see what differences are between metaclusters within the same celltype, it is good to investigate the MFI values per marker per metacluster. This clustering heatmap can also be found in flowSOMmary.
 
 ```{r}
-library(FlowSOM)
-fsom <- readRDS("D:/Internship/FlowSOM results/mds/fsom_15X15meta20_mds (2).rds")
+#MFI per metacluster per marker
+mfi_table <- GetMetaclusterMFIs(fsom)
+mfi_df$metacluster <- rownames(mfi_df)
 
-#expression trees
-p2 <- PlotMarker(fsom = fsom, marker = 'Bcl-2', maxNodeSize=1, equalNodeSize=TRUE)
-
-ggsave(filename = paste0(dir_results, "fsom_tree_Bcl2_expression.pdf"), plot = p2, height = 8.5, width = 11)
+#visualise
+pheatmap(mfi_table, scale = "column")
 ```
 
-## STATISTICAL TESTING
-```{r}
-library('flowCore') 
-library('ggplot2')
-library('flowAI')
-library('readxl')
-library('ggcyto')
-library('openCyto')
-library('flowClust')
-library(dplyr)
-```
+### STEP 4.5 - STATISTICAL TESTING
 
+In order to see if differences per celltype can be found between disease states, statistical testing was employed. Wilcoxon Rank-Sum Test are performed with Benferroni correction. For the effect size, cliff's delta is calculated. 
 
 ```{r}
-#expression values per manual labeled group
-library(dplyr)
-library(FlowSOM)
+#DATA EXTRACTION
 fsom_BM <- readRDS("D:/Internship/FlowSOM results/healthy BM/fsom_12X12meta20_healthyB.rds")
 fsom_MDS <- readRDS("D:/Internship/FlowSOM results/mds/fsom_15X15meta20_mds (2).rds")
 fsom_AML <- readRDS("D:/Internship/FlowSOM results/aml/fsom_15X15meta20_AML (2).rds")
 
-# 1. Extract expression data from FlowSOM objects
 expr_BM <- as.data.frame(fsom_BM$data)
 expr_MDS <- as.data.frame(fsom_MDS$data)
 expr_AML <- as.data.frame(fsom_AML$data)
@@ -1479,30 +1523,25 @@ expr_AML$node <- fsom_AML$map$mapping[,1]
 expr_AML$manual_label <- fsom_AML$metaclustering_labels[expr_AML$node]
 expr_AML$disease <- "AML"
 
-expr_all <- bind_rows(expr_BM, expr_MDS, expr_AML)
+expr_all <- bind_rows(expr_BM, expr_MDS, expr_AML) #merge
 
 node_summary <- expr_all %>%
   group_by(disease, manual_label, node) %>%
-  summarise(across(c("Ki-67", "Bcl-2"), mean, na.rm = TRUE), .groups = "drop")
+  summarise(across(c("Ki-67", "Bcl-2"), \(x) median(x, na.rm = TRUE)), .groups = "drop")
 
+#save median values per node
 write.csv(node_summary, "D:/Internship/FlowSOM results/nodesum.csv", row.names = FALSE)
 ```
 
 ```{r}
-library(dplyr)
-library(effsize)
-library(purrr)
-
-# Your disease pairs to compare
+#STATISTICAL ANALYSIS
 disease_pairs <- list(
   c("BM", "MDS"),
   c("BM", "AML"),
-  c("MDS", "AML")
-)
+  c("MDS", "AML")) #which comparison
 
-markers <- c("Ki-67", "Bcl-2")
+markers <- c("Ki-67", "Bcl-2") #which markers?
 
-# Run comparisons per manual_label and marker
 results <- expand.grid(
   manual_label = unique(expr_all$manual_label),
   marker = markers,
@@ -1517,8 +1556,8 @@ results <- expand.grid(
       
       if (length(g1) < 2 || length(g2) < 2) return(NULL)
       
-      test <- wilcox.test(g1, g2, exact = FALSE)
-      delta <- cliff.delta(g1, g2)$estimate
+      test <- wilcox.test(g1, g2, exact = FALSE) #statistical test
+      delta <- cliff.delta(g1, g2)$estimate #cliff's delta calculation
       
       tibble(
         Disease_1 = pair[1],
@@ -1532,15 +1571,13 @@ results <- expand.grid(
   })) %>%
   unnest(comparisons)
 
-# Apply Bonferroni correction
+#Bonferroni correction
 results <- results %>%
   mutate(
     Bonferroni_p = pmin(Wilcoxon_p * n(), 1),
     Significant = Bonferroni_p < 0.05
   )
 
-# Save the results to a CSV file
+#Save the results to a CSV file
 write.csv(results, "D:/Internship/FlowSOM results/manual_label_wilcox_cliffs.csv", row.names = FALSE)
-
-
 ```
