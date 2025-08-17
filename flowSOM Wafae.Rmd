@@ -1427,6 +1427,9 @@ library(pheatmap)
 library(effsize)
 library(purrr)
 library(tidyr)
+
+library(furrr)   # parallel map
+library(future)  # plan for parallelization
 ```
 
 ### STEP 4.1 - LOAD IN MANUALLY LABELED FSOM OBJECT
@@ -1497,9 +1500,9 @@ pheatmap(mfi_table, scale = "column")
 
 ### STEP 4.5 - STATISTICAL TESTING
 
-In order to see if differences per celltype can be found between disease states, statistical testing was employed. Wilcoxon Rank-Sum Test are performed with Benferroni correction. For the effect size, cliff's delta is calculated.
+In order to see if differences per celltype can be found between disease states, statistical testing was employed. Wilcoxon Rank-Sum Test are performed with Benferroni correction.
 
-*NOTE: during calculation of cliff's delta, NA was seen due to integer overflow. Thus for calculating cliff's delta, downsampling is applied to get idea.*
+The intention was to use the Cliff's delta as effect size measure, however during calculation, NA was seen due to integer overflow. Thus probability-weighted sampling was used for the cliff's delta calculations with 1000 iterations and downsampling to 10.000 values. Additionally the Vargha and Delaney’s was calculated.
 
 ```{r}
 #DATA EXTRACTION
@@ -1530,46 +1533,86 @@ expr_all <- bind_rows(expr_BM, expr_MDS, expr_AML) #merge
 
 node_summary <- expr_all %>%
   group_by(disease, manual_label, node) %>%
-  summarise(across(c("Ki-67", "Bcl-2"), \(x) median(x, na.rm = TRUE)), .groups = "drop")
+  summarise(across(c("Ki-67"), \(x) median(x, na.rm = TRUE)), .groups = "drop")
 
 #save median values per node
-write.csv(node_summary, "D:/Internship/FlowSOM results/nodesum.csv", row.names = FALSE)
+write.csv(node_summary, "D:/Internship/FlowSOM results/nodesum_Ki67.csv", row.names = FALSE)
 ```
 
 ```{r}
+#CLIFFS DELTA SAMPLING ONZIN
+
 #STATISTICAL ANALYSIS
 disease_pairs <- list(
   c("BM", "MDS"),
   c("BM", "AML"),
   c("MDS", "AML")) #which comparison
 
-markers <- c("Ki-67", "Bcl-2") #which markers?
+markers <- c("Ki-67") #which markers?
 
 #convert data to long format
 df_long <- expr_all %>%
-  select(manual_label, disease, all_of(markers)) %>%  # keep only relevant columns
+  select(manual_label, disease, all_of(markers)) %>%
   pivot_longer(cols = all_of(markers),
                names_to = "marker",
                values_to = "value")
 
+#Downsampling for cliff's calculation
+downsample_preserve_dist <- function(x, max_size = 10000) {
+  n <- length(x)
+  if(n <= max_size) return(x)
+
+  dens <- density(x, n = max_size) #kernal density estimate for data
+  idx <- findInterval(x, dens$x)
+  probs <- dens$y[idx]
+  probs <- probs / sum(probs)
+  
+  sample(x, max_size, prob = probs) #weighted sampling according to KDE
+}
+
+plan(multisession, workers = parallel::detectCores() - 1)
+
+#Cliff's delta calculation (Bootstrapping)
+cliff_delta_boot_parallel <- function(g1, g2, max_size = 10000, n_boot = 1000, ci_level = 0.95) {
+
+  single_delta <- function(i) {
+    g1_s <- if(length(g1) > max_size) sample(g1, max_size) else g1
+    g2_s <- if(length(g2) > max_size) sample(g2, max_size) else g2
+    cliff.delta(g1_s, g2_s)$estimate
+  }
+  
+  #Bootstrap calculations
+  deltas <- future_map_dbl(1:n_boot, single_delta, .options = furrr_options(seed = TRUE))
+  
+  alpha <- 1 - ci_level
+  ci_lower <- quantile(deltas, alpha / 2, na.rm = TRUE)
+  ci_upper <- quantile(deltas, 1 - alpha / 2, na.rm = TRUE)
+  
+  list(
+    Cliffs_delta = median(deltas, na.rm = TRUE),
+    CI_lower = ci_lower,
+    CI_upper = ci_upper
+  )
+}
+
 #STATISTICAL ANALYSIS
-run_stats <- function(data) {
+run_stats_parallel_boot <- function(data, max_size = 10000, n_boot = 1000) {
   map_dfr(disease_pairs, function(pair) {
     g1 <- filter(data, disease == pair[1]) %>% pull(value)
     g2 <- filter(data, disease == pair[2]) %>% pull(value)
     
-    if (length(g1) < 2 || length(g2) < 2) return(NULL)
+    if(length(g1) < 2 || length(g2) < 2) return(NULL)
     
-    max_sample <- 10000
-    g1_s <- if(length(g1) > max_sample) sample(g1, max_sample) else g1
-    g2_s <- if(length(g2) > max_sample) sample(g2, max_sample) else g2
-    
+    cliff_res <- cliff_delta_boot_parallel(g1, g2, max_size, n_boot)
     
     tibble(
       Disease_1 = pair[1],
       Disease_2 = pair[2],
-      Wilcoxon_p = wilcox.test(g1, g2, exact = FALSE)$p.value, #statistical test
-      Cliffs_delta = round(cliff.delta(g1_s, g2_s)$estimate, 2), #cliff's delta
+      Wilcoxon_p = wilcox.test(g1, g2, exact = FALSE)$p.value,
+      VD_A = round(VD.A(g1, g2)$estimate, 2),
+      Cliffs_delta = round(cliff_res$Cliffs_delta, 2),
+      CI_lower = round(cliff_res$CI_lower, 2),
+      CI_upper = round(cliff_res$CI_upper, 2),
       Median_1 = median(g1, na.rm = TRUE),
       Median_2 = median(g2, na.rm = TRUE)
     )
@@ -1578,13 +1621,13 @@ run_stats <- function(data) {
 
 results <- df_long %>%
   group_by(manual_label, marker) %>%
-  group_modify(~ run_stats(.x)) %>%
+  group_modify(~ run_stats_parallel_boot(.x, max_size = 10000, n_boot = 1000)) %>%
   ungroup() %>%
   mutate(
-    Bonferroni_p = pmin(Wilcoxon_p * n(), 1),
+    Bonferroni_p = pmin(Wilcoxon_p * nrow(.), 1),
     Significant = Bonferroni_p < 0.05
   )
 
 #Save the results to a CSV file
-write.csv(results, "D:/Internship/FlowSOM results/manual_label_wilcox_cliffs.csv", row.names = FALSE)
+write.csv(results, "D:/Internship/FlowSOM results/manual_label_wilcox_bootstrap.csv", row.names = FALSE)
 ```
