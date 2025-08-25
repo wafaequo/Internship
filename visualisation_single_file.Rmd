@@ -16,10 +16,6 @@ library('flowClust')
 ```
 
 ```{r}
-
-#SELECT WHICH FILE YOU WANT TO VISUALIZE
-#raw_ff <- read.FCS("D:/Internship/data/2. compensated dataset/healthy BM/Femoral head 1 tube 2.fcs", transformation = FALSE)
-
 patient_group <- 'healthy BM' #healthy BM/mds/aml
 dir_results <- file.path("D:/Internship/FlowSOM results", patient_group)
 dir.create(dir_results, showWarnings = FALSE)
@@ -35,14 +31,104 @@ colnames(ff)
 ```
 
 ```{r}
+#SELECT WHICH FILE YOU WANT TO VISUALIZE
+fcs <- read.FCS("D:/Internship/data/7. aggregated files/healthy BM/all_tubes_aggregated_everything.fcs", transformation = FALSE)
+
+#keyword(raw_ff)[c("$P8R","$P8B","$P8E")]
+#colnames(fcs)
+showme <- exprs(fcs)
+```
+
+```{r}
+library(flowCore)
+
+# Original flowFrame
+fr <-  fcs
+
+# New column
+cutoff_ki67 <- 0.2
+new_col <- as.integer(exprs(fr)[, "KO"] > cutoff_ki67)
+
+# Make it a matrix with column name
+new_mat <- matrix(new_col, ncol = 1)
+colnames(new_mat) <- "Ki67_pos"
+
+# Append using fr_append_cols
+fr <- fr_append_cols(fr, new_mat)
+
+# Check
+lol <- exprs(fr)
+```
+
+```{r}
+#SELECT WHICH FILE YOU WANT TO VISUALIZE
+raw_ff2 <- read.FCS("D:/Internship/data/3. cleaned dataset/healthy BM/Femoral head 1 tube 1_QC.fcs", transformation = FALSE)
+
+#keyword(raw_ff2)[c("$P1R","$P1B","$P1E")]
+colnames(raw_ff2)
+```
+
+```{r}
+ff1 <- read.FCS("D:/Internship/data/3. cleaned dataset/healthy BM/Femoral head 1 tube 1_QC.fcs", transformation = FALSE)
+ff2 <- read.FCS("D:/Internship/data/3. cleaned dataset/healthy BM/Femoral head 1 tube 2_QC.fcs", transformation = FALSE)
+
+library(flowCore)
+
+scale_to_reference <- function(target_fcs, reference_fcs, skip_channels = c()) {
+  # Extract expression matrices and parameter info
+  e_target <- exprs(target_fcs)
+  e_ref    <- exprs(reference_fcs)
+  
+  pd_target <- pData(parameters(target_fcs))
+  pd_ref    <- pData(parameters(reference_fcs))
+  
+  # Find common channels by name
+  common_channels <- intersect(pd_target$name, pd_ref$name)
+  
+  for (ch_name in common_channels) {
+    if (ch_name %in% skip_channels) next  # skip manually specified channels
+    
+    # Get column index in target and reference
+    idx_target <- which(pd_target$name == ch_name)
+    idx_ref    <- which(pd_ref$name == ch_name)
+    
+    # Read $PnR values
+    srcR <- as.numeric(keyword(target_fcs, paste0("$P", idx_target, "R"))[[1]])
+    refR <- as.numeric(keyword(reference_fcs, paste0("$P", idx_ref, "R"))[[1]])
+    
+    # Linear scaling
+    factor <- refR / srcR
+    e_target[, idx_target] <- e_target[, idx_target] * factor
+    
+    # Update recorded range in target
+    keyword(target_fcs)[[paste0("$P", idx_target, "R")]] <- as.character(refR)
+  }
+  
+  # Update expression matrix
+  exprs(target_fcs) <- e_target
+  target_fcs
+}
+
+# Channels you want to skip manually (e.g., viability dye)
+skip_ch <- c("Original_ID", "TIME")
+
+# Scale target to reference
+scaled_target <- scale_to_reference(ff1, ff2, skip_channels = skip_ch)
+```
+
+```{r}
+fcs <- read.FCS("D:/Internship/data/7. aggregated files/aml/all_tubes_aggregated_everything.fcs", transformation = FALSE)
+```
+
+```{r}
 #VISUALISATION
 # Suppose your counts range from 0 to 5000 across all plots
 fixed_limits <- c(0, 70)
 
-ggcyto(ff, aes(x = `CD45`, y = `SSC-A`)) +
+ggcyto(fcs, aes(x = `FSC-A`, y = `SSC-A`)) +
   geom_hex(bins = 128) +  # keep default colors, just fix limits
-  labs(title = "Healthy BM: CD45 vs SSC-A",
-       x = "CD45 Expression", y = "Side Scatter (SSC-A)") +
+  labs(title = "aml: FSC-A vs SSC-A",
+       x = "Forward Scatter (FSC-A)", y = "Side Scatter (SSC-A)") +
   theme_minimal(base_size = 14) +
   theme(
     plot.title = element_text(face = "bold", size = 16, hjust = 0.5),

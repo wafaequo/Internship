@@ -1,6 +1,7 @@
 ---
 title: "Protocol for FlowSOM implementation"
 output: html_notebook
+---2
 ---
 
 NOTE: *R version 4.5.0*. Also make sure [Rtools45](https://cran.r-project.org/bin/windows/Rtools/rtools45/rtools.html) is downloaded.
@@ -309,10 +310,6 @@ for (file_name in names(fcs_compensated)) {
 
 ### STEP 1.3 - PEACOQC QUALITY CHECK
 
-#### STEP 1.3.1 - Removal of margin events
-
-For each fluorescent channel, the events are removed whole real intensity exceeds the detector's sensitivity using `PeacoQC::RemoveMargins`.
-
 ```{r}
 library('flowCore') 
 library('ggplot2')
@@ -356,12 +353,15 @@ raw_data_event_counts_df <- data.frame(
 write.csv(raw_data_event_counts_df, file = glue("D:/Internship/raw_event_count_{patient_group}.csv"), row.names = FALSE)
 ```
 
+#### STEP 1.3.1 - Removal of margin events
+
+For each fluorescent channel, the events are removed whole real intensity exceeds the detector's sensitivity using `PeacoQC::RemoveMargins`.
+
 ```{r}
 #REMOVE MARGIN EVENTS
-
 channels_of_interest <- c("FS-H", "FS-A", "SS-H", "SS-A", "FITC", "PE", "ECD", "PC5.5","PC7","APC","A700","A750","HLA","KO")
 
-fcs_margins <- lapply(fcs_compensated, function(ff) {
+fcs_margins <- lapply(fcs_scaled, function(ff) {
   present_channels <- intersect(channels_of_interest, colnames(exprs(ff)))
   
   PeacoQC::RemoveMargins(ff, present_channels)
@@ -415,7 +415,7 @@ for (i in seq_along(fcs_margins)) {
 }
 ```
 
-### STEP 1.4 - TRANSFORMATION
+### STEP 1.4: TRANSFORMATION
 
 Compensation corrects for spectral overlap between fluorochromes but does not address the underlying distribution of flow cytometry data. Such data typically exhibits a positively skewed distribution, especially in fluorescent channels. To make the data more suitable for analysis and visualization, transformation methods are applied to achieve a more symmetric, near-normal distribution (e.g. logarithmic, biexponential (logicle), or arcsinh).
 
@@ -436,7 +436,7 @@ library('PeacoQC')
 knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
                       message = FALSE, cache.lazy = FALSE)
 
-patient_group <- "mds"  #healthy BM/mds/aml
+patient_group <- "aml"  #healthy BM/mds/aml
 fcs_dir <- file.path("D:/Internship/data/3. cleaned dataset", patient_group)
 
 
@@ -450,7 +450,70 @@ fcs_cleaned <- setNames(
 )
 ```
 
-#### STEP 1.4.1 - Transformations
+#### STEP 1.4.1 - Scaling to fit bulk data
+
+```{r}
+#PARAMETERS
+ref <- fcs_cleaned[[3]] #Reference to which we fit the scaling
+skip_ch <- c("Original_ID", "TIME") #which channels to skip during scaling
+
+#SCALING FUNCTION
+scale_to_reference <- function(target_fcs, reference_fcs, skip_channels = c("Original_ID", "TIME")) {
+  target_name <- keyword(target_fcs)[["FILENAME"]] #which file are we scaling
+
+  pd_target <- pData(parameters(target_fcs))
+  pd_ref    <- pData(parameters(reference_fcs))
+  
+  common_channels <- intersect(pd_target$name, pd_ref$name)
+  
+  #Check if scaling is necessary
+  need_scaling <- FALSE
+  for (ch_name in common_channels) {
+    if (ch_name %in% skip_channels) next
+    idx_target <- which(pd_target$name == ch_name)
+    idx_ref    <- which(pd_ref$name == ch_name)
+    srcR <- as.numeric(keyword(target_fcs, paste0("$P", idx_target, "R"))[[1]])
+    refR <- as.numeric(keyword(reference_fcs, paste0("$P", idx_ref, "R"))[[1]])
+    if (!isTRUE(all.equal(srcR, refR))) {
+      need_scaling <- TRUE
+      break
+    }
+  }
+  
+  if (!need_scaling) {
+    return(target_fcs)
+  }
+  
+  message(sprintf("Scaling needed for file '%s'.",
+                    target_name))
+  e_target <- exprs(target_fcs)
+  
+  #Scaling
+  for (ch_name in common_channels) {
+    if (ch_name %in% skip_channels) next
+    idx_target <- which(pd_target$name == ch_name)
+    idx_ref    <- which(pd_ref$name == ch_name)
+    srcR <- as.numeric(keyword(target_fcs, paste0("$P", idx_target, "R"))[[1]])
+    refR <- as.numeric(keyword(reference_fcs, paste0("$P", idx_ref, "R"))[[1]])
+    
+    factor <- refR / srcR
+    e_target[, idx_target] <- e_target[, idx_target] * factor
+    keyword(target_fcs)[[paste0("$P", idx_target, "R")]] <- as.character(refR)
+  }
+  
+  exprs(target_fcs) <- e_target
+  target_fcs
+}
+
+#APPLYING SCALING TO FULL DISEASE GROUP
+fcs_scaled <- lapply(fcs_cleaned, function(target) {
+  scale_to_reference(target, ref, skip_channels = skip_ch)
+})
+
+names(fcs_scaled) <- names(fcs_cleaned)
+```
+
+#### STEP 1.4.2 - Transformations
 
 ```{r}
 #ARCSINH TRANSFORMATION
@@ -467,25 +530,29 @@ arcsinh_transform <- function(ff, cofactor = 150, exclude_channels = c("FS-A", "
   return(ff_transformed)
 }
 
-fcs_transformed <- lapply(fcs_cleaned, arcsinh_transform, cofactor = 150)
+fcs_transformed <- lapply(fcs_scaled, arcsinh_transform, cofactor = 150)
 ```
 
 For the linear transformation, a reference marker is needed. We used CD45 marker (fluorochrome KO in this study) as the reference.
 
 ```{r}
 linear_transform <- function(flow_frame, reference_marker = "KO",
-                                       scatter_channels = c("SS-A", "FS-A", "SS-H", "FS-H")) {
+                             scatter_channels = c("SS-A", "FS-A", "SS-H", "FS-H")) {
   expr <- exprs(flow_frame)
 
-  #Checking if channels are present
-  missing <- setdiff(c(reference_marker, scatter_channels), colnames(expr))
-  if (length(missing) > 0) {
-    warning(paste("Skipping file: missing channels:", paste(missing, collapse = ", ")))
+  # Keep only channels that exist
+  present_channels <- intersect(scatter_channels, colnames(expr))
+  if (!reference_marker %in% colnames(expr)) {
+    warning(paste("Skipping file: missing reference channel:", reference_marker))
+    return(flow_frame)
+  }
+  if (length(present_channels) == 0) {
+    warning("No scatter channels present, skipping file")
     return(flow_frame)
   }
 
-  #Applying linear transformation
-  for (channel in scatter_channels) {
+  # Apply linear transformation only to present channels
+  for (channel in present_channels) {
     q5_ref  <- quantile(expr[, reference_marker], 0.05, na.rm = TRUE)
     q95_ref <- quantile(expr[, reference_marker], 0.95, na.rm = TRUE)
     q5_sc   <- quantile(expr[, channel], 0.05, na.rm = TRUE)
@@ -501,13 +568,14 @@ linear_transform <- function(flow_frame, reference_marker = "KO",
   return(flow_frame)
 }
 
+
 fcs_transform_lin <- lapply(fcs_transformed, linear_transform)
 
 #Preserve original names
 names(fcs_transform_lin) <- names(fcs_transformed)
 ```
 
-#### STEP 1.4.2 - Min-Max Normalization
+#### STEP 1.4.3 - Min-Max Normalization
 
 For the min-max normalization the 0.001 and 0.999 quantiles are chosen as this is more robust against outliers, avoiding accidental skewing of the data if a few extreme measurements would be included.
 
@@ -546,12 +614,11 @@ QC_data_event_counts_df <- data.frame(
 )
 
 #change name to right disease state
-write.csv(QC_data_event_counts_df, file = "D:/Internship/afterQC_event_count_mds.csv", row.names = FALSE)
+write.csv(QC_data_event_counts_df, file = "D:/Internship/afterQC_event_count_aml.csv", row.names = FALSE)
 ```
 
 ```{r}
 #SAVING .FCS FILES AFTER TRANSFORMATION
-
 output_dir <- normalizePath(
   file.path("D:/Internship/data/4. transformed dataset", patient_group),
   mustWork = FALSE
@@ -581,7 +648,7 @@ library(dplyr)
 knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
                       message = FALSE, cache.lazy = FALSE)
 
-patient_group <- "mds"  #healthy BM/mds/aml
+patient_group <- "aml"  #healthy BM/mds/aml
 fcs_dir <- file.path("D:/Internship/data/4. transformed dataset", patient_group)
 
 
@@ -617,8 +684,8 @@ for (name in names(fcs_transformed)) {
   p <- ggcyto(raw_ff, aes(x = `FS-A`, y = `FS-H`)) +
     geom_hex(bins = 128) +
     labs(
-      title = paste("FSC-A vs FSC-H - (before gating):", base_name),
-      x = "FSC-A", y = "FSC-H"
+      title = paste("FSC_A vs FSC-H - (before gating):", base_name),
+      x = "FSC_A", y = "FSC-H"
     ) +
     theme_minimal() +
     scale_fill_viridis_c(option = "C", direction = -1)
@@ -716,16 +783,22 @@ for (i in seq_along(fcs_transformed)) {
 
 ```{r}
 #EXTRACT SIZE OF DATASETS AFTER REMOVING DEBRIS FOR EDA
-names(fcs_gated) <- basename(fcs_file_names)
+# Give names to fcs_gated based on the file names
+names(fcs_gated) <- names(fcs_transformed)
 
+# Now extract event counts
 gated_data_event_counts <- sapply(fcs_gated, nrow)
+
 gated_data_event_counts_df <- data.frame(
-  Sample = names(gated_data_event_counts),
+  Sample = names(fcs_gated),
   Events = gated_data_event_counts
 )
 
-#change name to right disease state
-write.csv(gated_data_event_counts_df, file = "D:/Internship/gated_event_count_mds.csv", row.names = FALSE)
+# Save to CSV
+write.csv(gated_data_event_counts_df,
+          file = "D:/Internship/gated_event_count_aml.csv",
+          row.names = FALSE)
+
 ```
 
 ### STEP 2.3 - DOUBLET REMOVAL
@@ -785,7 +858,7 @@ single_data_event_counts_df <- data.frame(
 )
 
 #change name to right disease state
-write.csv(single_data_event_counts_df, file = "D:/Internship/preprocessed_event_count_mds.csv", row.names = FALSE)
+write.csv(single_data_event_counts_df, file = "D:/Internship/preprocessed_event_count_aml.csv", row.names = FALSE)
 ```
 
 ### STEP 2.4 - AFTER GATING VISUALIZATION
@@ -798,7 +871,7 @@ The plots we want to save for inspection are:
 
 ```{r}
 output_dir <- normalizePath(
-  file.path("D:/Internship/data/5. preprocessed dataset", patient_group, "/after_gating/CD45vsSSC-A"),
+  file.path("D:/Internship/data/5. preprocessed dataset", patient_group, "/after_gating/FSC-AvsFSC-H"),
   mustWork = FALSE
 )
 dir.create(output_dir, showWarnings = FALSE)
@@ -807,17 +880,17 @@ for (name in names(fcs_singles)) {
   raw_ff <- fcs_singles[[name]]
   base_name <- tools::file_path_sans_ext(name)
   
-  p <- ggcyto(raw_ff, aes(x = `KO`, y = `SS-A`)) +
+  p <- ggcyto(raw_ff, aes(x = `FS-A`, y = `FS-H`)) +
     geom_hex(bins = 128) +
     labs(
-      title = paste("CD45 vs SSC-A - (after gating):", base_name),
-      x = "CD45", y = "SSC-A"
+      title = paste("FSC-A vs FSC-H - (after gating):", base_name),
+      x = "FSC-A", y = "FSC_H"
     ) +
     theme_minimal() +
     scale_fill_viridis_c(option = "C", direction = -1)
   
   ggsave(
-    filename = file.path(output_dir, paste0(base_name, "_CD45_vs_SSC-A.png")),
+    filename = file.path(output_dir, paste0(base_name, "_FSC-A_vs_FSC_H.png")),
     plot = p,
     width = 5, height = 5, dpi = 300
   )
@@ -829,67 +902,188 @@ for (name in names(fcs_singles)) {
 Here we change the names of the fluorescent channels to the markers that they actually represent.
 
 ```{r}
-#MANUALLY ADD NAMES OF WHAT EACH CHANNEL REPRESENTS PER TUBE
-tube_markers <- list(
-  c("FSC-A", "SSC-A", "IgG1-1", "NA1", "IgG1-2", "CD13", "CD117", "CD34", "NA2", "NA3", "HLA-DR", "CD45", "TIME", "FSC-H"), #Tube 1
-  c("FSC-H", "FSC-A", "SSC-A", "Ki-67", "CD14", "CD64", "CD13", "CD117", "CD34", "CD10", "CD11b", "HLA-DR", "CD45", "TIME"), #Tube 2
-  c("FSC-H", "FSC-A", "SSC-A", "Ki-67", "CD105", "CD123", "CD33", "CD117", "NA1", "CD71", "CD235a", "HLA-DR", "CD45", "TIME"), #Tube 3
-  c("FSC-H", "FSC-A", "SSC-A", "Ki-67", "NA1", "NA2", "CD33", "CD117", "CD36", "NA4", "NA5", "HLA-DR", "CD45", "TIME"), #Tube 4
-  c("FSC-H", "FSC-A", "SSC-A", "CD16", "CD64", "Bcl-2", "CD13", "CD117", "CD34", "CD10", "CD14", "HLA-DR", "CD45", "TIME"), #Tube 5
-  c("FSC-H", "FSC-A", "SSC-A", "NA1", "CD105", "Bcl-2", "CD33", "CD117", "NA2", "CD71", "CD235a", "HLA-DR", "CD45", "TIME"), #Tube 6
-  c("FSC-H", "FSC-A", "SSC-A", "NA1", "NA2", "Bcl-2", "CD33", "CD117", "CD36", "NA3", "NA4", "HLA-DR", "CD45", "TIME") #Tube 7
+#MANUALLY SETTING THE NAMES OF THE TUBES USING TUBE_MAPS
+#names(fcs_singles) <- names(fcs_transformed)
+
+tube_maps <- list(
+  # Tube 1
+  "tube 1" = c(
+    "FS-A"   = "FSC-A",
+    "SS-A"   = "SSC-A",
+    "FITC"   = "IgG1-1",
+    "PE"     = "NA1",
+    "ECD"    = "IgG1-2",
+    "PC5.5"  = "CD13",
+    "PC7"    = "CD117",
+    "APC"    = "CD34",
+    "A700"   = "NA2",
+    "A750"   = "NA3",
+    "HLA"    = "HLA-DR",
+    "KO"     = "CD45",
+    "TIME"   = "TIME",
+    "FS-H"   = "FSC-H",
+    "SS-H"   = "SSC-H"
+  ),
+  
+  # Tube 2
+  "tube 2" = c(
+    "FS-H"   = "FSC-H",
+    "FS-A"   = "FSC-A",
+    "SS-A"   = "SSC-A",
+    "SS-H"   = "SSC-H",
+    "FITC"   = "Ki-67",
+    "PE"     = "CD14",
+    "ECD"    = "CD64",
+    "PC5.5"  = "CD13",
+    "PC7"    = "CD117",
+    "APC"    = "CD34",
+    "A700"   = "CD10",
+    "A750"   = "CD11b",
+    "HLA"    = "HLA-DR",
+    "KO"     = "CD45",
+    "TIME"   = "TIME"
+  ),
+  
+  # Tube 3
+  "tube 3" = c(
+    "FS-H"   = "FSC-H",
+    "FS-A"   = "FSC-A",
+    "SS-A"   = "SSC-A",
+    "SS-H"   = "SSC-H",
+    "FITC"   = "Ki-67",
+    "PE"     = "CD105",
+    "ECD"    = "CD123",
+    "PC5.5"  = "CD33",
+    "PC7"    = "CD117",
+    "APC"    = "NA1",
+    "A700"   = "CD71",
+    "A750"   = "CD235a",
+    "HLA"    = "HLA-DR",
+    "KO"     = "CD45",
+    "TIME"   = "TIME"
+  ),
+  
+  # Tube 4
+  "tube 4" = c(
+    "FS-H"   = "FSC-H",
+    "FS-A"   = "FSC-A",
+    "SS-A"   = "SSC-A",
+    "SS-H"   = "SSC-H",
+    "FITC"   = "Ki-67",
+    "PE"     = "NA1",
+    "ECD"    = "NA2",
+    "PC5.5"  = "CD33",
+    "PC7"    = "CD117",
+    "APC"    = "CD36",
+    "A700"   = "NA4",
+    "A750"   = "NA5",
+    "HLA"    = "HLA-DR",
+    "KO"     = "CD45",
+    "TIME"   = "TIME"
+  ),
+  
+  # Tube 5
+  "tube 5" = c(
+    "FS-H"   = "FSC-H",
+    "FS-A"   = "FSC-A",
+    "SS-A"   = "SSC-A",
+    "SS-H"   = "SSC-H",
+    "FITC"   = "CD16",
+    "PE"     = "CD64",
+    "ECD"    = "Bcl-2",
+    "PC5.5"  = "CD13",
+    "PC7"    = "CD117",
+    "APC"    = "CD34",
+    "A700"   = "CD10",
+    "A750"   = "CD14",
+    "HLA"    = "HLA-DR",
+    "KO"     = "CD45",
+    "TIME"   = "TIME"
+  ),
+  
+  # Tube 6
+  "tube 6" = c(
+    "FS-H"   = "FSC-H",
+    "FS-A"   = "FSC-A",
+    "SS-A"   = "SSC-A",
+    "SS-H"   = "SSC-H",
+    "FITC"   = "NA1",
+    "PE"     = "CD105",
+    "ECD"    = "Bcl-2",
+    "PC5.5"  = "CD33",
+    "PC7"    = "CD117",
+    "APC"    = "NA2",
+    "A700"   = "CD71",
+    "A750"   = "CD235a",
+    "HLA"    = "HLA-DR",
+    "KO"     = "CD45",
+    "TIME"   = "TIME"
+  ),
+  
+  # Tube 7
+  "tube 7" = c(
+    "FS-H"   = "FSC-H",
+    "FS-A"   = "FSC-A",
+    "SS-A"   = "SSC-A",
+    "SS-H"   = "SSC-H",
+    "FITC"   = "NA1",
+    "PE"     = "NA2",
+    "ECD"    = "Bcl-2",
+    "PC5.5"  = "CD33",
+    "PC7"    = "CD117",
+    "APC"    = "CD36",
+    "A700"   = "NA3",
+    "A750"   = "NA4",
+    "HLA"    = "HLA-DR",
+    "KO"     = "CD45",
+    "TIME"   = "TIME"
+  )
 )
 
-#Helper function that extracts Tube number from filename
+#helper function for tube number extraction
 getTubeNumber <- function(name) {
   tube_num <- regmatches(name, regexpr("tube[ _]?\\d+", name, ignore.case = TRUE))
-  if(length(tube_num) == 0) return(NA)
+  if (length(tube_num) == 0) return(NA)
   as.numeric(gsub(".*?(\\d+)", "\\1", tube_num, ignore.case = TRUE))
 }
 
-#which columns do you want to extract from the datasets?
-cols_to_keep <- c("FS-A", "SS-A", "FITC", "PE", "ECD", "PC5.5", "PC7", "APC", "A700", "A750", "HLA", "KO", "TIME", "FS-H")
 
-
-#Changing channel names
 for (fcs_name in names(fcs_singles)) {
   tube_num <- getTubeNumber(fcs_name)
+  tube_key <- paste0("tube ", tube_num)
   
-  if (is.na(tube_num) || tube_num < 1 || tube_num > length(tube_markers)) {
-    warning(paste("Tube number not found or invalid in name:", fcs_name))
+  if (!tube_key %in% names(tube_maps)) {
+    warning(paste("No mapping found for", fcs_name))
     next
   }
   
   fcs_obj <- fcs_singles[[fcs_name]]
+  map <- tube_maps[[tube_key]]
   
+  # Only rename columns that exist in the FCS file
   cols_present <- colnames(fcs_obj@exprs)
-  cols_keep_present <- intersect(cols_present, cols_to_keep)
+  rename_idx <- intersect(names(map), cols_present)
   
-  if (length(cols_keep_present) > 0) {
-    exprs_mat <- fcs_obj@exprs[, cols_keep_present, drop = FALSE]
-    
-    fcs_obj <- flowCore::flowFrame(exprs_mat)
-  } else {
-    warning(paste("No matching columns to keep in", fcs_name))
-    next
-  }
-  
-  ncols <- ncol(fcs_obj@exprs)
-  nmarkers <- length(tube_markers[[tube_num]])
-  
-  if (ncols != nmarkers) {
-    warning(paste("After cleaning, column number mismatch in", fcs_name, 
-                  "- has", ncols, "columns but", nmarkers, "markers provided"))
-    next
-  }
-  
-  # Assign new column names
-  new_names <- tube_markers[[tube_num]]
+  # Update the expression matrix column names
+  new_names <- colnames(fcs_obj@exprs)
+  new_names[match(rename_idx, new_names)] <- map[rename_idx]
   colnames(fcs_obj@exprs) <- new_names
-  colnames(fcs_obj) <- new_names  # Updates metadata
-
-  fcs_singles[[fcs_name]] <- fcs_obj
   
+  # Update parameter metadata ($PnS for marker, $PnN for channel if needed)
+  param_desc <- pData(parameters(fcs_obj))
+  for (i in seq_along(rename_idx)) {
+    old <- rename_idx[i]
+    new <- map[old]
+    
+    # update $PnS (marker/desc field)
+    param_desc$desc[which(param_desc$name == old)] <- new
+    
+    # optionally also update $PnN (channel name itself, e.g. FITC -> Ki-67)
+    param_desc$name[which(param_desc$name == old)] <- new
+  }
+  pData(parameters(fcs_obj)) <- param_desc
+  
+  fcs_singles[[fcs_name]] <- fcs_obj
   message(paste("Processed and renamed columns for", fcs_name))
 }
 
@@ -897,8 +1091,8 @@ for (fcs_name in names(fcs_singles)) {
 
 ```{r}
 #CHECKING FOR ONE FILE IF RENAMING WAS SUCCESSFULL
-ff_vb <- fcs_singles[[3]]
-colnames(ff_vb)
+ff_vb <- fcs_singles[[2]]
+ff_vb_exprs <- exprs(ff_vb)
 ```
 
 ### STEP 2.6 - SAVING PREPROCESSED FILES
@@ -914,6 +1108,135 @@ dir.create(output_dir, showWarnings = FALSE)
 for (file_name in names(fcs_singles)) {
   file_path <- file.path(output_dir, file_name)
   write.FCS(fcs_singles[[file_name]], filename = file_path)
+}
+```
+
+## INTERMISSION: Ki67/Bcl-2 density & Ki67/Bcl-2 positivity
+
+Mestrum et al. (2025) researched the Ki67/Bcl-2 positive fractions. Meaning it filtered on Ki67/Bcl-2 positive cells and then calculates how much of those cells belong to Blast cells, erythroid cells, monocytes or myeloid cells. As this is a binary method, we are not able to mimick these results using FlowSOM. What we however can do is the following:
+
+1.  We establish a Ki67 and Bcl-2 density plot based on MFI: This just displays per node what the Mean Intensity Fluorescence is. This is not correlated to the positive fraction, as it may be that the positive fraction of a celltype is high, while its density is low. Establishing these trees may reveal underlying heterogeneity in Ki67 and Bcl-2 expression across different cell populations, highligh nodes with relatively higher proliferative or anti-apoptotic profiles, and provide insights into exprssion gradients.
+2.  We determine Ki67 and Bcl-2 positive and assign a 0 or 1 per event. When we then make the FlowSom Trees we can say what the percentage of Ki67 positive or Bcl-2 positivity is per node.
+
+### STEP I.1:  Ki67 POSITIVE CELLS
+
+```{r}
+library('flowCore') 
+library('ggplot2')
+library('flowAI')
+library('readxl')
+library('ggcyto')
+library('openCyto')
+library('flowClust')
+library(dplyr)
+```
+
+```{r}
+knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
+                      message = FALSE, cache.lazy = FALSE)
+
+patient_group <- "aml"  #healthy BM/mds/aml
+fcs_dir <- file.path("D:/Internship/data/5. preprocessed dataset", patient_group)
+
+
+fcs_file_names <- list.files(path = fcs_dir, pattern = "\\.fcs$", full.names = FALSE)
+fcs_paths <- file.path(fcs_dir, fcs_file_names)
+
+fcs_preproc <- setNames(
+  lapply(fcs_paths, read.FCS, transformation = FALSE),
+  fcs_file_names
+)
+
+#GROUP THE TUBES PER PATIENT
+get_patient_id <- function(fname) {
+  pat <- regexpr("tube", fname, ignore.case = TRUE)
+  if (pat == -1) {
+    return(tools::file_path_sans_ext(fname))
+  }
+  patient_id <- substr(fname, 1, pat - 2)
+  trimws(patient_id)
+}
+
+patient_ids <- sapply(names(fcs_preproc), get_patient_id)
+
+fcs_by_patient <- split(fcs_preproc, patient_ids)
+```
+
+```{r}
+### STEP 1: define function to create a rectangular gate on Tube 1
+make_igg_cutoff <- function(fcs, igg_channel) {
+  dat <- exprs(fcs)
+  igg <- dat[, igg_channel]
+  quantile(igg, probs = 0.98, na.rm = TRUE)
+}
+
+process_patient <- function(tubes, cutoff_ki67, cutoff_bcl2) {
+  lapply(names(tubes), function(name) {
+    fcs <- tubes[[name]]
+    
+    # Skip tube 1 (control tube used to define cutoffs)
+    if (grepl("tube 1", name, ignore.case = TRUE)) {
+      return(fcs)
+    }
+    
+    dat <- exprs(fcs)
+    
+    # Add Ki67-pos if Ki67 is present
+    if ("Ki-67" %in% colnames(dat)) {
+      new_mat <- matrix(as.integer(dat[, "Ki-67"] > cutoff_ki67), ncol = 1)
+      colnames(new_mat) <- "Ki67_pos"
+      fcs <- fr_append_cols(fcs, new_mat)
+    }
+    
+    # Add Bcl2-pos if Bcl-2 is present
+    if ("Bcl-2" %in% colnames(dat)) {
+      new_mat <- matrix(as.integer(dat[, "Bcl-2"] > cutoff_bcl2), ncol = 1)
+      colnames(new_mat) <- "Bcl2_pos"
+      fcs <- fr_append_cols(fcs, new_mat)
+    }
+    
+    fcs
+  }) |> setNames(names(tubes))
+}
+
+# Process all patients
+all_patients_processed <- lapply(fcs_by_patient, function(one_patient) {
+  
+  # --- identify tube 1 ---
+  tube1_name <- grep("tube 1", names(one_patient), ignore.case = TRUE, value = TRUE)
+  tube1 <- one_patient[[tube1_name]]
+  
+  # --- get cutoffs ---
+  cutoff_ki67 <- make_igg_cutoff(tube1, "IgG1-1")
+  cutoff_bcl2 <- make_igg_cutoff(tube1, "IgG1-2")
+  
+  # --- process all tubes for this patient ---
+  process_patient(one_patient, cutoff_ki67, cutoff_bcl2)
+  
+}) |> setNames(names(fcs_by_patient))
+
+```
+
+```{r}
+# Define output folder
+output_dir <- file.path("D:/Internship/data/i. Ki67 and Bcl2 pos", patient_group)
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Loop over patients
+for (patient in names(all_patients_processed)) {
+  cat("Saving processed tubes for patient:", patient, "\n")
+  
+  patient_tubes <- all_patients_processed[[patient]]
+  
+  # Save each tube individually
+  for (tube_name in names(patient_tubes)) {
+    tube_fcs <- patient_tubes[[tube_name]]
+    
+    output_path <- file.path(output_dir, paste0(tube_name, "_processed.fcs"))
+    flowCore::write.FCS(tube_fcs, filename = output_path)
+  }
+  
+  cat("Saved all tubes for patient:", patient, "\n")
 }
 ```
 
@@ -936,11 +1259,12 @@ library(matrixStats)
 knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
                       message = FALSE, cache.lazy = FALSE)
 
-patient_group <- "mds"  #healthy BM/mds/aml
-fcs_dir <- file.path("D:/Internship/data/5. preprocessed dataset", patient_group)
+patient_group <- "aml"  #healthy BM/mds/aml
+fcs_dir <- file.path("D:/Internship/data/i. Ki67 and Bcl2 pos", patient_group)
 
 
 fcs_file_names <- list.files(path = fcs_dir, pattern = "\\.fcs$", full.names = FALSE)
+fcs_file_names <- fcs_file_names[!grepl("tube 1", fcs_file_names, ignore.case = TRUE)]
 fcs_paths <- file.path(fcs_dir, fcs_file_names)
 
 fcs_preproc <- setNames(
@@ -1100,23 +1424,19 @@ CombineFCS <- function(FCS1, RelevantMarkers1, FCS2, RelevantMarkers2, backbone_
 }
 ```
 
-```{r}
-#one patient merging
-fcs_patient <- fcs_by_patient[[]]
-```
 
 ```{r}
 #MERGING OF FILES
 
 #Manually select which channels to use for merging
 marker_list <- list(
-  c("FSC-A", "SSC-A", "IgG1-1", "IgG1-2", "CD13", "CD117", "CD34", "HLA-DR", "CD45","FSC-H"),  #Tube 1
-  c("FSC-H", "FSC-A", "SSC-A", "Ki-67", "CD14", "CD64", "CD13", "CD117", "CD34", "CD10", "CD11b", "HLA-DR", "CD45"),  #Tube 2
-  c("FSC-H", "FSC-A", "SSC-A", "Ki-67", "CD105", "CD123", "CD33", "CD117", "CD71", "CD235a", "HLA-DR", "CD45"), #Tube 3
-  c("FSC-H", "FSC-A", "SSC-A","Ki-67","CD33", "CD117", "CD36","HLA-DR", "CD45"), #Tube 4
-    c("FSC-H", "FSC-A", "SSC-A", "CD16", "CD64", "Bcl-2", "CD13", "CD117", "CD34", "CD10", "CD14", "HLA-DR", "CD45"), #Tube 5
-  c("FSC-H", "FSC-A", "SSC-A", "CD105", "Bcl-2", "CD33", "CD117", "CD71", "CD235a", "HLA-DR", "CD45"), #Tube 6
-  c("FSC-H", "FSC-A", "SSC-A", "Bcl-2", "CD33", "CD117", "CD36","HLA-DR", "CD45") #Tube 7
+  c("FSC-A", "SSC-A", "IgG1-", "IgG1-2", "CD13", "CD117", "CD34", "HLA-DR", "CD45","FSC-H"),  #Tube 1
+  c("FSC-H", "FSC-A", "SSC-A", "Ki-67", "CD14", "CD64", "CD13", "CD117", "CD34", "CD10", "CD11b", "HLA-DR", "CD45", "Ki67_pos"),  #Tube 2
+  c("FSC-H", "FSC-A", "SSC-A", "Ki-67", "CD105", "CD123", "CD33", "CD117", "CD71", "CD235a", "HLA-DR", "CD45", "Ki67_pos"), #Tube 3
+  c("FSC-H", "FSC-A", "SSC-A","Ki-67","CD33", "CD117", "CD36","HLA-DR", "CD45", "Ki67_pos"), #Tube 4
+    c("FSC-H", "FSC-A", "SSC-A", "CD16", "CD64", "Bcl-2", "CD13", "CD117", "CD34", "CD10", "CD14", "HLA-DR", "CD45", "Bcl2_pos"), #Tube 5
+  c("FSC-H", "FSC-A", "SSC-A", "CD105", "Bcl-2", "CD33", "CD117", "CD71", "CD235a", "HLA-DR", "CD45", "Bcl2_pos"), #Tube 6
+  c("FSC-H", "FSC-A", "SSC-A", "Bcl-2", "CD33", "CD117", "CD36","HLA-DR", "CD45", "Bcl2_pos") #Tube 7
 ) 
 
 
@@ -1155,8 +1475,8 @@ for (patient in names(fcs_by_patient)) {
   }
 
   # Select which tubes to merge by changing indices
-  selected_files <- patient_files[c(2,3,4,6,7)]
-  selected_markers <- marker_list[c(2,3,4,6,7)]
+  selected_files <- patient_files
+  selected_markers <- marker_list[c(2,3,4,5,6,7)]
 
   # Merge
   merged_data <- MultiCombineFCS(selected_files, selected_markers, backbone_markers)
@@ -1173,6 +1493,7 @@ for (patient in names(fcs_by_patient)) {
 }
 ```
 
+
 ## STEP 4: AGGREGATE FILES
 
 We aggregate patient files in order to get one `.fcs` file representing the whole disease group. This aggregation step is necessary, as the FlowSOM algorithm requires a single .fcs file as input for training and clustering.
@@ -1181,7 +1502,7 @@ Deutz et al. (2021) opted for a method that selected 40.000 cells per `.fcs`, ho
 
 -   for Healthy group: 40.000 x 50 = 2.000.000
 
--   for MDS patients: 40.000 x 18 = 720.000
+-   for MDS patients: 40.000 x 25 = 1.000.000
 
 -   for AML patients: 40.000 x 18 = 720.000
 
@@ -1200,7 +1521,7 @@ library(dplyr)
 knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
                       message = FALSE, cache.lazy = FALSE)
 
-patient_group <- "healthy BM"  #healthy BM/mds/aml
+patient_group <- "aml"  #healthy BM/mds/aml
 
 fcs_dir <- file.path("D:/Internship/data/6. merged dataset", patient_group)
 output_dir <- normalizePath(
@@ -1214,7 +1535,12 @@ fcs_paths <- file.path(fcs_dir, all_fcs_files)
 
 #set parameters
 set.seed(2020)
-aggregate_cells <- 2000000
+aggregate_cells <- 720000
+```
+
+```{r}
+ff <- flowCore::read.FCS(fcs_paths[10], transformation = FALSE)
+ff_expr <- exprs(ff)
 ```
 
 ```{r}
@@ -1248,7 +1574,7 @@ library(dplyr)
 ### STEP 1.1 - LOADING IN DATA + PARAMETERS
 
 ```{r}
-patient_group <- 'mds' #healthy BM/mds/aml
+patient_group <- 'aml' #healthy BM/mds/aml
 dir_results <- file.path("D:/Internship/FlowSOM results", patient_group)
 dir.create(dir_results, showWarnings = FALSE)
 fcs_path <- file.path("D:/Internship/data/7. aggregated files", patient_group, "all_tubes_aggregated_everything.fcs")
@@ -1261,16 +1587,9 @@ colnames(ff)
 #parameters are here chosen by https://www.youtube.com/watch?v=hP1aTZ1Iqfcthe 10x10 grid most used for smaller panels. 12x12, 15x15 or 20x20 often chosen for larger panels. for metaclusters, recommendation is to choose 1.5 times the amount of clusters you are expecting. Use the scatterplots to finetune. The algorithms to choose the amount of clustering within flowSOM are not recommended as they strongly underestimate the amount of clusters. 
 SOM_x <- 15 
 SOM_y <- 15 
-n_meta <- 20 #how many metaclusters?
+n_meta <- 15 #how many metaclusters?
 seed <- 2020 
 scaling <- FALSE
-
-expr_matrix <- exprs(ff)
-
-excluded_markers <- c("File", "File_scattered", "Original_ID", "FSC-H") #which markers do I not include for training?
-selected_markers <- setdiff(colnames(expr_matrix), excluded_markers)
-selected_exprs <- expr_matrix[, selected_markers]
-ff_selected <- flowFrame(selected_exprs)
 ```
 
 ### STEP 1.2 - TRAINING FLOWSOM
@@ -1278,16 +1597,21 @@ ff_selected <- flowFrame(selected_exprs)
 You start of with building a tree based on the lineage markers within your panel. This is done to distinguish cell populations within your dataset.
 
 ```{r}
-fsom <- FlowSOM(input = ff_selected, scale = scaling, 
+excluded_markers <- c("File", "File_scattered", "Original_ID", "FSC-H", "Ki67_pos", "Bcl2_pos") #which markers do I not include for training?
+expr_matrix <- exprs(ff)
+selected_markers <- setdiff(colnames(expr_matrix), excluded_markers)
+
+fsom <- FlowSOM(input = ff, scale = scaling, 
                 seed = seed, 
                 nClus = n_meta, 
                 xdim = SOM_x, 
-                ydim = SOM_y)
+                ydim = SOM_y,
+                colsToUse = selected_markers)
 ```
 
 ```{r}
 #saving trained tree
-saveRDS(fsom, file = file.path(dir_results, "fsom_12X12meta20_healthyBM.rds"))
+saveRDS(fsom, file = file.path(dir_results, "fsom_15X15meta15_aml.rds"))
 ```
 
 ### STEP 1.3 - FLOWSOM SUMMARY
@@ -1295,10 +1619,12 @@ saveRDS(fsom, file = file.path(dir_results, "fsom_12X12meta20_healthyBM.rds"))
 Create a report summarizing the FlowSOM results, including cluster information and visualizations. The `FlowSOMmary` function generates a comprehensive report that can be saved as a PDF file.
 
 ```{r}
-FlowSOMmary(fsom, plotFile = paste0(dir_results, "fsom_summary_12x12meta20_healthyBM.pdf"))
+FlowSOMmary(fsom, plotFile = file.path(dir_results, "fsom_summary_15x15meta15_aml.pdf"))
 ```
 
 ## STEP 2: EXTRACTING TRAINED FSOM OBJECT (NOT MANUALLY LABELED)
+
+Once you have trained your fsom, you can extract it using the following code to start manual labeling process. 
 
 ```{r}
 library('flowCore') 
@@ -1320,17 +1646,17 @@ dir.create(dir_results, showWarnings = FALSE)
 
 SOM_x <- 15 
 SOM_y <- 15 
-n_meta <- 20 #how many metaclusters?
+n_meta <- 15 #how many metaclusters?
 seed <- 2020 
 scaling <- FALSE
 
 #extracting trained fsom object
-fsom <- readRDS("D:/Internship/FlowSOM results/mds/fsom_15X15meta20_mds (2).rds")
+fsom <- readRDS("D:/Internship/FlowSOM results/healthy BM/fsom_15X15meta15_healthyBM.rds")
 ```
 
 ## STEP 3: MANUAL LABELING
 
-In order to establish which metaclusters represent which types of cells, it is usefull to look at 2D scatterplots.
+In order to establish which metaclusters represent which types of cells, it is useful to look at 2D scatterplots.
 
 -   `channel_pairs` = which scatterplots do we want to create
 
@@ -1436,7 +1762,7 @@ library(future)  # plan for parallelization
 
 ```{r}
 #parameters needed for further analysis
-patient_group <- 'mds' #healthy BM/mds/aml
+patient_group <- "mds" #healthy BM/mds/aml
 dir_results <- file.path("D:/Internship/FlowSOM results", patient_group)
 dir.create(dir_results, showWarnings = FALSE)
 
@@ -1455,9 +1781,30 @@ fsom <- readRDS("D:/Internship/FlowSOM results/mds/fsom_15X15meta20_mds (2).rds"
 Once the clustering is deemed of quality, we can express the amount of Ki-67/Bcl-2 expression of the metaclusters. This will give us information about the pattern of expression.
 
 ```{r}
+celltype_colors <- c(
+  "Mature Erythroids"     = "#e41a1c",  #red
+  "Immature Erythroids"   = "#ff7f00",  #orange
+  "Mature Myeloids"       = "#984ea3",  #purple
+  "Immature Myeloids"     = "#f20a90",  #bright pink
+  "Platelets"             = "#ffff33",  #yellow
+  "Blasts"                = "#4daf4a",  #green
+  "CD36-/CD71+ cells"     = "#f781bf",  #light pink
+  "Eosinophils"           = "#377eb8",  #light grey
+  "Debris"                = "#000000",  #black
+  "Mature Monocytes"      = "#253bfc",  #bright blue
+  "Lymphocytes"           = "#23f8d6",  #teal
+  "Other"                 = "#bcbcbc"   #grey
+)
+
 #expression trees
-p2 <- PlotMarker(fsom = fsom, marker = 'Bcl-2', maxNodeSize=1, equalNodeSize=TRUE)
-ggsave(filename = paste0(dir_results, "fsom_tree_Bcl2_expression.pdf"), plot = p2, height = 8.5, width = 11)
+p2 <- PlotMarker(fsom = fsom, 
+                 marker = 'Bcl-2', 
+                 maxNodeSize=1.3, 
+                 equalNodeSize=TRUE,
+                 backgroundValues = fsom$metaclustering_labels,
+                 backgroundColors = celltype_colors)
+
+ggsave(filename = paste0(dir_results, "fdsom_tree_Bcl2_expression.pdf"), plot = p2, height = 8.5, width = 11)
 ```
 
 ### STEP 4.3 - CELL COUNTS
@@ -1500,7 +1847,7 @@ pheatmap(mfi_table, scale = "column")
 
 ### STEP 4.5 - STATISTICAL TESTING
 
-In order to see if differences per celltype can be found between disease states, statistical testing was employed. Wilcoxon Rank-Sum Test are performed with Benferroni correction.
+In order to see if differences per celltype can be found between disease states, statistical testing was employed. Wilcoxon Rank-Sum Test are performed with Bonferroni correction.
 
 The intention was to use the Cliff's delta as effect size measure, however during calculation, NA was seen due to integer overflow. Thus probability-weighted sampling was used for the cliff's delta calculations with 1000 iterations and downsampling to 10.000 values. Additionally the Vargha and Delaney’s was calculated.
 
@@ -1536,11 +1883,182 @@ node_summary <- expr_all %>%
   summarise(across(c("Ki-67"), \(x) median(x, na.rm = TRUE)), .groups = "drop")
 
 #save median values per node
-write.csv(node_summary, "D:/Internship/FlowSOM results/nodesum_Ki67.csv", row.names = FALSE)
+#write.csv(node_summary, "D:/Internship/FlowSOM results/nodesum_ki_67.csv", row.names = FALSE)
 ```
 
 ```{r}
-#CLIFFS DELTA SAMPLING ONZIN
+library(dplyr)
+
+expr_BM_summary <- expr_MDS %>%
+  group_by(manual_label) %>%
+  summarise(median_Ki67 = median(`Ki-67`, na.rm = TRUE),
+            IQR_low = quantile(`Ki-67`, 0.25, na.rm = TRUE),
+            IQR_high = quantile(`Ki-67`, 0.75, na.rm = TRUE),
+            .groups = "drop")
+
+write.csv(expr_BM_summary,
+          "D:/Internship/FlowSOM results/expr_BM_summary.csv",
+          row.names = FALSE)
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+celltype_colors <- c(
+  "Mature Erythroids"     = "#e41a1c",  #red
+  "Immature Erythroids"   = "#ff7f00",  #orange
+  "Mature Myeloids"       = "#984ea3",  #purple
+  "Immature Myeloids"     = "#f20a90",  #bright pink
+  "Platelets"             = "#ffff33",  #yellow
+  "Blasts"                = "#4daf4a",  #green
+  "CD36-/CD71+ cells"     = "#f781bf",  #light pink
+  "Eosinophils"           = "#377eb8",  #light grey
+  "Debris"                = "#000000",  #black
+  "Mature Monocytes"      = "#253bfc",  #bright blue
+  "Lymphocytes"           = "#23f8d6",  #teal
+  "Other"                 = "#bcbcbc"   #grey
+)
+
+# 1) Summarize Ki-67 for BM (median + IQR)
+sum_BM <- expr_MDS %>%
+  filter(!is.na(`Ki-67`), !is.na(manual_label)) %>%
+  group_by(manual_label) %>%
+  summarise(
+    median = median(`Ki-67`, na.rm = TRUE),
+    q1     = quantile(`Ki-67`, 0.25, na.rm = TRUE),
+    q3     = quantile(`Ki-67`, 0.75, na.rm = TRUE),
+    n      = dplyr::n(),
+    .groups = "drop"
+  )
+
+selected_types <- c("Blasts","Immature Myeloids", "Mature Myeloids", "Immature Erythroids", "Mature Erythroids", "Mature Monocytes", "Lymphocytes")
+
+sum_BM_selected <- sum_BM %>%
+  filter(manual_label %in% selected_types)
+
+sum_BM_selected$manual_label <- factor(
+  sum_BM_selected$manual_label,
+  levels = selected_types
+)
+
+ggplot(sum_BM_selected, aes(x = manual_label, y = median, color = manual_label)) +
+  geom_errorbar(aes(ymin = q1, ymax = q3), width = 0.1, linewidth = 1.2) +
+  geom_point(size = 4, shape = 15) +
+  scale_color_manual(values = celltype_colors) +
+  labs(
+    y = "Ki-67 expression (median ± IQR)",
+    x = "Cell type"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none",
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.8)
+  )
+
+
+```
+
+```{r}
+#CELLTYPES WITHIN ONE DISEASE STATE
+
+all_pairs <- combn(unique(df_long$manual_label), 2, simplify = FALSE)
+
+exclude <- c("Platelets", "Debris", "Other","Eosinophils", "CD36-/CD71+ cells")
+
+filtered_pairs <- celltype_pairs[!sapply(celltype_pairs, function(x) any(x %in% exclude))]
+
+celltype_pairs <- unique(lapply(filtered_pairs, sort))
+
+markers <- c("Ki-67") #which markers?
+
+#convert data to long format
+df_long <- expr_all %>%
+  select(manual_label, disease, all_of(markers)) %>%
+  pivot_longer(cols = all_of(markers),
+               names_to = "marker",
+               values_to = "value")
+
+#Downsampling for cliff's calculation
+downsample_preserve_dist <- function(x, max_size = 10000) {
+  n <- length(x)
+  if(n <= max_size) return(x)
+
+  dens <- density(x, n = max_size) #kernal density estimate for data
+  idx <- findInterval(x, dens$x)
+  probs <- dens$y[idx]
+  probs <- probs / sum(probs)
+  
+  sample(x, max_size, prob = probs) #weighted sampling according to KDE
+}
+
+plan(multisession, workers = parallel::detectCores() - 1)
+
+#Cliff's delta calculation (Bootstrapping)
+cliff_delta_boot_parallel <- function(g1, g2, max_size = 10000, n_boot = 1000, ci_level = 0.95) {
+
+  single_delta <- function(i) {
+    g1_s <- if(length(g1) > max_size) sample(g1, max_size) else g1
+    g2_s <- if(length(g2) > max_size) sample(g2, max_size) else g2
+    cliff.delta(g1_s, g2_s)$estimate
+  }
+  
+  #Bootstrap calculations
+  deltas <- future_map_dbl(1:n_boot, single_delta, .options = furrr_options(seed = TRUE))
+  
+  alpha <- 1 - ci_level
+  ci_lower <- quantile(deltas, alpha / 2, na.rm = TRUE)
+  ci_upper <- quantile(deltas, 1 - alpha / 2, na.rm = TRUE)
+  
+  list(
+    Cliffs_delta = median(deltas, na.rm = TRUE),
+    CI_lower = ci_lower,
+    CI_upper = ci_upper
+  )
+}
+
+#STATISTICAL ANALYSIS
+run_stats_within_disease <- function(data, max_size = 10000, n_boot = 1000) {
+  map_dfr(celltype_pairs, function(pair) {
+    g1 <- filter(data, manual_label == pair[1]) %>% pull(value)
+    g2 <- filter(data, manual_label == pair[2]) %>% pull(value)
+    
+    if(length(g1) < 2 || length(g2) < 2) return(NULL)
+    
+    cliff_res <- cliff_delta_boot_parallel(g1, g2, max_size, n_boot)
+    
+    tibble(
+      Celltype_1 = pair[1],
+      Celltype_2 = pair[2],
+      Wilcoxon_p = wilcox.test(g1, g2, exact = FALSE)$p.value,
+      VD_A = round(VD.A(g1, g2)$estimate, 2),
+      Cliffs_delta = round(cliff_res$Cliffs_delta, 2),
+      CI_lower = round(cliff_res$CI_lower, 2),
+      CI_upper = round(cliff_res$CI_upper, 2),
+      Median_1 = median(g1, na.rm = TRUE),
+      Median_2 = median(g2, na.rm = TRUE)
+    )
+  })
+}
+
+results_celltype <- df_long %>%
+  group_by(disease, marker) %>%
+  group_modify(~ run_stats_within_disease(.x, max_size = 10000, n_boot = 1000)) %>%
+  ungroup() %>%
+  mutate(
+    Bonferroni_p = pmin(Wilcoxon_p * nrow(.), 1),
+    Significant = Bonferroni_p < 0.05
+  )
+
+
+#Save the results to a CSV file
+write.csv(results_celltype, "D:/Internship/FlowSOM results/manual_label_wilcox_celltypesonediseasetstate_ki-67.csv", row.names = FALSE)
+```
+
+```{r}
+#CELLTYPES BETWEEN DISEASE STATES
 
 #STATISTICAL ANALYSIS
 disease_pairs <- list(
@@ -1548,7 +2066,7 @@ disease_pairs <- list(
   c("BM", "AML"),
   c("MDS", "AML")) #which comparison
 
-markers <- c("Ki-67") #which markers?
+markers <- c("Bcl-2") #which markers?
 
 #convert data to long format
 df_long <- expr_all %>%
@@ -1629,5 +2147,5 @@ results <- df_long %>%
   )
 
 #Save the results to a CSV file
-write.csv(results, "D:/Internship/FlowSOM results/manual_label_wilcox_bootstrap.csv", row.names = FALSE)
+write.csv(results, "D:/Internship/FlowSOM results/manual_label_wilcox_bootstrap_Bcl-2.csv", row.names = FALSE)
 ```
